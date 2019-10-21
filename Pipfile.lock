@@ -10,8 +10,8 @@
         "sources": [
             {
                 "name": "pypi",
-                "url": "https://pypi.org/simple",
-                "verify_ssl": true
+                "url": "http://10.0.8.49:8081/repository/pypi-all/simple",
+                "verify_ssl": false
             }
         ]
     },

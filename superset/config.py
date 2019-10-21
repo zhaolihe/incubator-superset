@@ -86,10 +86,11 @@ SUPERSET_WEBSERVER_PORT = 8088
 # [load balancer / proxy / envoy / kong / ...] timeout settings.
 # You should also make sure to configure your WSGI server
 # (gunicorn, nginx, apache, ...) timeout setting to be <= to this setting
-SUPERSET_WEBSERVER_TIMEOUT = 60
+# SUPERSET_WEBSERVER_TIMEOUT = 60
 
 SUPERSET_DASHBOARD_POSITION_DATA_LIMIT = 65535
-EMAIL_NOTIFICATIONS = False
+EMAIL_NOTIFICATIONS = True
+# 自定义安全管理
 CUSTOM_SECURITY_MANAGER = None
 SQLALCHEMY_TRACK_MODIFICATIONS = False
 # ---------------------------------------------------------
@@ -413,7 +414,7 @@ class CeleryConfig(object):
     CELERY_RESULT_BACKEND = "db+sqlite:///celery_results.sqlite"
     CELERYD_LOG_LEVEL = "DEBUG"
     CELERYD_PREFETCH_MULTIPLIER = 1
-    CELERY_ACKS_LATE = False
+    CELERY_ACKS_LATE = True
     CELERY_ANNOTATIONS = {
         "sql_lab.get_sql_results": {"rate_limit": "100/s"},
         "email_reports.send": {
@@ -514,13 +515,13 @@ ENABLE_ACCESS_REQUEST = False
 
 # smtp server configuration
 EMAIL_NOTIFICATIONS = False  # all the emails are sent using dryrun
-SMTP_HOST = "localhost"
-SMTP_STARTTLS = True
+SMTP_HOST = "mail.yoyi.tv"
+SMTP_STARTTLS = False
 SMTP_SSL = False
-SMTP_USER = "superset"
+SMTP_USER = "monit@yoyi.tv"
 SMTP_PORT = 25
-SMTP_PASSWORD = "superset"
-SMTP_MAIL_FROM = "superset@superset.com"
+SMTP_PASSWORD = "yoyi1234567890"
+SMTP_MAIL_FROM = "monit@yoyi.tv"
 
 if not CACHE_DEFAULT_TIMEOUT:
     CACHE_DEFAULT_TIMEOUT = CACHE_CONFIG.get("CACHE_DEFAULT_TIMEOUT")  # type: ignore
@@ -593,7 +594,7 @@ SQL_QUERY_MUTATOR = None
 ENABLE_FLASK_COMPRESS = True
 
 # Enable / disable scheduled email reports
-ENABLE_SCHEDULED_EMAIL_REPORTS = False
+ENABLE_SCHEDULED_EMAIL_REPORTS = True
 
 # If enabled, certail features are run in debug mode
 # Current list:
@@ -605,7 +606,7 @@ EMAIL_REPORTS_CRON_RESOLUTION = 15
 
 # Email report configuration
 # From address in emails
-EMAIL_REPORT_FROM_ADDRESS = "reports@superset.org"
+EMAIL_REPORT_FROM_ADDRESS = "monit@yoyi.tv"
 
 # Send bcc of all reports to this address. Set to None to disable.
 # This is useful for maintaining an audit trail of all email deliveries.
@@ -615,7 +616,7 @@ EMAIL_REPORT_BCC_ADDRESS = None
 # This user should have permissions to browse all the dashboards and
 # slices.
 # TODO: In the future, login as the owner of the item to generate reports
-EMAIL_REPORTS_USER = "admin"
+EMAIL_REPORTS_USER = "yoyi"
 EMAIL_REPORTS_SUBJECT_PREFIX = "[Report] "
 
 # The webdriver to use for generating reports. Use one of the following
@@ -625,7 +626,7 @@ EMAIL_REPORTS_SUBJECT_PREFIX = "[Report] "
 # chrome:
 #   Requires: headless chrome
 #   Limitations: unable to generate screenshots of elements
-EMAIL_REPORTS_WEBDRIVER = "firefox"
+EMAIL_REPORTS_WEBDRIVER = "chrome"
 
 # Window size - this will impact the rendering of the data
 WEBDRIVER_WINDOW = {"dashboard": (1600, 2000), "slice": (3000, 1200)}
@@ -634,7 +635,7 @@ WEBDRIVER_WINDOW = {"dashboard": (1600, 2000), "slice": (3000, 1200)}
 WEBDRIVER_CONFIGURATION: Dict[Any, Any] = {}
 
 # The base URL to query for accessing the user interface
-WEBDRIVER_BASEURL = "http://0.0.0.0:8080/"
+WEBDRIVER_BASEURL = "http://10.0.3.18:8080/"
 
 # Send user to a link where they can report bugs
 BUG_REPORT_URL = None
@@ -706,3 +707,8 @@ elif importlib.util.find_spec("superset_config"):
     except Exception:
         logging.exception("Found but failed to import local superset_config")
         raise
+# -----------------------------------
+# YOYI BI METADATA
+# -----------------------------------
+YOYI_BI_METADATA = "mysql+pymysql://root:789456123@10.0.3.99:3306/dimmetric_v1?charset=utf8"
+YOYI_LOG_DIR = "/Users/zhaolihe/Desktop"

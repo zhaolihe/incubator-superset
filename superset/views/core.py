@@ -108,6 +108,8 @@ from .utils import (
     get_form_data,
     get_viz,
 )
+from superset.yoyi.query import query
+from superset.yoyi.utils import utils as yoyi_utils
 
 config = app.config
 CACHE_DEFAULT_TIMEOUT = config.get("CACHE_DEFAULT_TIMEOUT", 0)
@@ -1219,13 +1221,16 @@ class Superset(BaseSupersetView):
                 datasource_type,
                 datasource.name,
             )
-
         standalone = request.args.get("standalone") == "true"
+
+        dt = query().get_metadata_from_bi(datasource.data) if datasource.data["name"].__eq__(
+            yoyi_utils.get_table_name()) else datasource.data
+
         bootstrap_data = {
             "can_add": slice_add_perm,
             "can_download": slice_download_perm,
             "can_overwrite": slice_overwrite_perm,
-            "datasource": datasource.data,
+            "datasource": dt,
             "form_data": form_data,
             "datasource_id": datasource_id,
             "datasource_type": datasource_type,

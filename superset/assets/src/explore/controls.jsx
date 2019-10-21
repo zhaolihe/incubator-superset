@@ -30,7 +30,7 @@
  * here's a list of the keys that are common to all controls, and as a result define the
  * control interface:
  *
- * - type: the control type, referencing a React component of the same name
+ * - type: the controdl type, referencing a React component of the same name
  * - label: the label as shown in the control's header
  * - description: shown in the info tooltip of the control's header
  * - default: the default value when opening a new chart, or changing visualization type

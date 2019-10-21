@@ -27,19 +27,8 @@ export default {
       controlSetRows: [
         ['groupby'],
         ['metrics'],
-        ['percent_metrics'],
         ['timeseries_limit_metric', 'row_limit'],
         ['include_time', 'order_desc'],
-      ],
-    },
-    {
-      label: t('NOT GROUPED BY'),
-      description: t('Use this section if you want to query atomic rows'),
-      expanded: true,
-      controlSetRows: [
-        ['all_columns'],
-        ['order_by_cols'],
-        ['row_limit', null],
       ],
     },
     {
@@ -57,6 +46,7 @@ export default {
         ['page_length', null],
         ['include_search', 'table_filter'],
         ['align_pn', 'color_pn'],
+        ['number_format'],
       ],
     },
   ],

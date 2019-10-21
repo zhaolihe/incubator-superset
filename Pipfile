@@ -1,12 +1,12 @@
 [[source]]
-url = "https://pypi.org/simple"
-verify_ssl = true
+url = "http://10.0.8.49:8081/repository/pypi-all/simple"
+verify_ssl = false
 name = "pypi"
 
 [packages]
 alembic = "==1.0.11"
 amqp = "==2.5.0"
-apispec = {version = "==1.3.3", extras = ["yaml"]}
+apispec = {version = "==1.3.3",extras = ["yaml"]}
 "asn1crypto" = "==0.24.0"
 attrs = "==19.1.0"
 backoff = "==1.8.0"
@@ -82,6 +82,8 @@ SQLAlchemy = "==1.3.6"
 Werkzeug = "==0.15.5"
 WTForms-JSON = "==0.3.3"
 WTForms = "==2.2.1"
+requests = "*"
+pydruid = "*"
 
 [dev-packages]
 
