@@ -15,25 +15,24 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint: disable=C,R,W
-from datetime import datetime
 import functools
 import logging
 import traceback
+from datetime import datetime
 from typing import Any, Dict
 
+import simplejson as json
+import yaml
 from flask import abort, flash, g, get_flashed_messages, redirect, Response
 from flask_appbuilder import BaseView, ModelView
 from flask_appbuilder.actions import action
 from flask_appbuilder.forms import DynamicForm
 from flask_appbuilder.models.sqla.filters import BaseFilter
 from flask_appbuilder.widgets import ListWidget
-from flask_babel import get_locale
-from flask_babel import gettext as __
-from flask_babel import lazy_gettext as _
+from flask_babel import get_locale, gettext as __, lazy_gettext as _
 from flask_wtf.form import FlaskForm
-import simplejson as json
+from werkzeug.exceptions import HTTPException
 from wtforms.fields.core import Field, UnboundField
-import yaml
 
 from superset import conf, db, get_feature_flags, security_manager
 from superset.exceptions import SupersetException, SupersetSecurityException
@@ -66,8 +65,7 @@ def get_error_msg():
 def json_error_response(msg=None, status=500, stacktrace=None, payload=None, link=None):
     if not payload:
         payload = {"error": "{}".format(msg)}
-        if stacktrace and conf.get("SHOW_STACKTRACE"):
-            payload["stacktrace"] = stacktrace
+        payload["stacktrace"] = utils.get_stacktrace()
     if link:
         payload["link"] = link
 
@@ -125,20 +123,27 @@ def handle_api_exception(f):
             return json_error_response(
                 utils.error_msg_from_exception(e),
                 status=e.status,
-                stacktrace=traceback.format_exc(),
+                stacktrace=utils.get_stacktrace(),
                 link=e.link,
             )
         except SupersetException as e:
             logging.exception(e)
             return json_error_response(
                 utils.error_msg_from_exception(e),
-                stacktrace=traceback.format_exc(),
+                stacktrace=utils.get_stacktrace(),
                 status=e.status,
+            )
+        except HTTPException as e:
+            logging.exception(e)
+            return json_error_response(
+                utils.error_msg_from_exception(e),
+                stacktrace=traceback.format_exc(),
+                status=e.code,
             )
         except Exception as e:
             logging.exception(e)
             return json_error_response(
-                utils.error_msg_from_exception(e), stacktrace=traceback.format_exc()
+                utils.error_msg_from_exception(e), stacktrace=utils.get_stacktrace()
             )
 
     return functools.update_wrapper(wraps, f)
@@ -193,7 +198,7 @@ class ListWidgetWithCheckboxes(ListWidget):
     template = "superset/fab_overrides/list_with_checkboxes.html"
 
 
-def validate_json(form, field):  # noqa
+def validate_json(form, field):
     try:
         json.loads(field.data)
     except Exception as e:
@@ -328,7 +333,7 @@ class SupersetFilter(BaseFilter):
 
 
 class DatasourceFilter(SupersetFilter):
-    def apply(self, query, func):  # noqa
+    def apply(self, query, func):
         if security_manager.all_datasource_access():
             return query
         perms = self.get_view_menus("datasource_access")
@@ -341,7 +346,7 @@ class CsvResponse(Response):
     Override Response to take into account csv encoding from config.py
     """
 
-    charset = conf.get("CSV_EXPORT").get("encoding", "utf-8")
+    charset = conf["CSV_EXPORT"].get("encoding", "utf-8")
 
 
 def check_ownership(obj, raise_if_false=True):

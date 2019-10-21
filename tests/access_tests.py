@@ -24,6 +24,7 @@ from superset.connectors.connector_registry import ConnectorRegistry
 from superset.connectors.druid.models import DruidDatasource
 from superset.connectors.sqla.models import SqlaTable
 from superset.models import core as models
+
 from .base_tests import SupersetTestCase
 
 ROLE_TABLES_PERM_DATA = {
@@ -31,7 +32,7 @@ ROLE_TABLES_PERM_DATA = {
     "database": [
         {
             "datasource_type": "table",
-            "name": "main",
+            "name": "examples",
             "schema": [{"name": "", "datasources": ["birth_names"]}],
         }
     ],
@@ -42,7 +43,7 @@ ROLE_ALL_PERM_DATA = {
     "database": [
         {
             "datasource_type": "table",
-            "name": "main",
+            "name": "examples",
             "schema": [{"name": "", "datasources": ["birth_names"]}],
         },
         {

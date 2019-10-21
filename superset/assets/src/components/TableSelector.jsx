@@ -19,7 +19,6 @@
 import React from 'react';
 import PropTypes from 'prop-types';
 import Select from 'react-virtualized-select';
-import createFilterOptions from 'react-select-fast-filter-options';
 import { ControlLabel, Label } from 'react-bootstrap';
 import { t } from '@superset-ui/translation';
 import { SupersetClient } from '@superset-ui/connection';
@@ -70,7 +69,6 @@ export default class TableSelector extends React.PureComponent {
       dbId: props.dbId,
       schema: props.schema,
       tableName: props.tableName,
-      filterOptions: null,
     };
     this.changeSchema = this.changeSchema.bind(this);
     this.changeTable = this.changeTable.bind(this);
@@ -112,6 +110,7 @@ export default class TableSelector extends React.PureComponent {
         schema: o.schema,
         label: o.label,
         title: o.title,
+        type: o.type,
       }));
       return ({ options });
     });
@@ -142,9 +141,9 @@ export default class TableSelector extends React.PureComponent {
             schema: o.schema,
             label: o.label,
             title: o.title,
+            type: o.type,
           }));
           this.setState(() => ({
-            filterOptions: createFilterOptions({ options }),
             tableLoading: false,
             tableOptions: options,
           }));
@@ -155,7 +154,7 @@ export default class TableSelector extends React.PureComponent {
           this.props.handleError(t('Error while fetching table list'));
         });
     }
-     this.setState(() => ({ tableLoading: false, tableOptions: [], filterOptions: null }));
+     this.setState(() => ({ tableLoading: false, tableOptions: [] }));
     return Promise.resolve();
   }
   fetchSchemas(dbId, force) {
@@ -206,6 +205,33 @@ export default class TableSelector extends React.PureComponent {
         {db.database_name}
       </span>);
   }
+  renderTableOption({ focusOption, focusedOption, key, option, selectValue, style, valueArray }) {
+    const classNames = ['Select-option'];
+    if (option === focusedOption) {
+      classNames.push('is-focused');
+    }
+    if (valueArray.indexOf(option) >= 0) {
+      classNames.push('is-selected');
+    }
+    return (
+      <div
+        className={classNames.join(' ')}
+        key={key}
+        onClick={() => selectValue(option)}
+        onMouseEnter={() => focusOption(option)}
+        style={style}
+      >
+        <span className="TableLabel">
+          <span className="m-r-5">
+            <small className="text-muted">
+              <i className={`fa fa-${option.type === 'view' ? 'eye' : 'table'}`} />
+            </small>
+          </span>
+          {option.label}
+        </span>
+      </div>
+    );
+  }
   renderSelectRow(select, refreshBtn) {
     return (
       <div className="section">
@@ -218,10 +244,10 @@ export default class TableSelector extends React.PureComponent {
     return this.renderSelectRow(
       <AsyncSelect
         dataEndpoint={
-          '/databaseasync/api/' +
-          'read?_flt_0_expose_in_sqllab=1&' +
-          '_oc_DatabaseAsync=database_name&' +
-          '_od_DatabaseAsync=asc'
+          '/api/v1/database/?q=' +
+          '(keys:!(none),' +
+          'filters:!((col:expose_in_sqllab,opr:eq,value:!t)),' +
+          'order_columns:database_name,order_direction:asc,page:0,page_size:-1)'
         }
         onChange={this.onDatabaseChange}
         onAsyncError={() => this.props.handleError(t('Error while fetching database list'))}
@@ -277,12 +303,13 @@ export default class TableSelector extends React.PureComponent {
         name="select-table"
         ref="selectTable"
         isLoading={this.state.tableLoading}
+        ignoreAccents={false}
         placeholder={t('Select table or type table name')}
         autosize={false}
         onChange={this.changeTable}
-        filterOptions={this.state.filterOptions}
         options={options}
         value={this.state.tableName}
+        optionRenderer={this.renderTableOption}
       />) : (
         <Select
           async
@@ -294,6 +321,7 @@ export default class TableSelector extends React.PureComponent {
           onChange={this.changeTable}
           value={this.state.tableName}
           loadOptions={this.getTableNamesBySubStr}
+          optionRenderer={this.renderTableOption}
         />);
     return this.renderSelectRow(
       select,

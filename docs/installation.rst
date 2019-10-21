@@ -24,7 +24,7 @@ Getting Started
 Superset has deprecated support for Python ``2.*`` and supports
 only ``~=3.6`` to take advantage of the newer Python features and reduce
 the burden of supporting previous versions. We run our test suite
-against ``3.6``, but running on ``3.7`` **should** work as well.
+against ``3.6``, but ``3.7`` is fully supported as well.
 
 Cloud-native!
 -------------
@@ -176,7 +176,7 @@ Superset installation and initialization
 Follow these few simple steps to install Superset.::
 
     # Install superset
-    pip install superset
+    pip install apache-superset
 
     # Initialize the database
     superset db upgrade
@@ -192,7 +192,7 @@ Follow these few simple steps to install Superset.::
     superset init
 
     # To start a development web server on port 8088, use -p to bind to another port
-    superset run -p 8080 --with-threads --reload --debugger
+    superset run -p 8088 --with-threads --reload --debugger
 
 After installation, you should be able to point your browser to the right
 hostname:port `http://localhost:8088 <http://localhost:8088>`_, login using
@@ -360,7 +360,7 @@ Here's a list of some of the recommended packages.
 |                  |                                       | For JDBC                                        |
 |                  |                                       | ``drill+jdbc://``                               |
 +------------------+---------------------------------------+-------------------------------------------------+
-| Apache Druid     | ``pip install pyduid``                | ``druid://``                                    |
+| Apache Druid     | ``pip install pydruid``                | ``druid://``                                    |
 +------------------+---------------------------------------+-------------------------------------------------+
 | Apache Hive      | ``pip install pyhive``                | ``hive://``                                     |
 +------------------+---------------------------------------+-------------------------------------------------+
@@ -376,6 +376,8 @@ Here's a list of some of the recommended packages.
 | BigQuery         | ``pip install pybigquery``            | ``bigquery://``                                 |
 +------------------+---------------------------------------+-------------------------------------------------+
 | ClickHouse       | ``pip install sqlalchemy-clickhouse`` |                                                 |
++------------------+---------------------------------------+-------------------------------------------------+
+| Exasol           | ``pip install sqlalchemy-exasol``     | ``exa+pyodbc://``                               |
 +------------------+---------------------------------------+-------------------------------------------------+
 | Google Sheets    | ``pip install gsheetsdb``             | ``gsheets://``                                  |
 +------------------+---------------------------------------+-------------------------------------------------+
@@ -521,6 +523,24 @@ into your global default defined in ``CACHE_CONFIG``.
         'CACHE_REDIS_URL': 'redis://localhost:6379/0',
     }
 
+It is also possible to pass a custom cache initialization function in the
+config to handle additional caching use cases. The function must return an
+object that is compatible with the `Flask-Cache <https://pythonhosted.org/Flask-Cache/>`_ API.
+
+.. code-block:: python
+
+    from custom_caching import CustomCache
+
+    def init_cache(app):
+        """Takes an app instance and returns a custom cache backend"""
+        config = {
+            'CACHE_DEFAULT_TIMEOUT': 60 * 60 * 24, # 1 day default (in secs)
+            'CACHE_KEY_PREFIX': 'superset_results',
+        }
+        return CustomCache(app, config)
+
+    CACHE_CONFIG = init_cache
+
 Superset has a Celery task that will periodically warm up the cache based on
 different strategies. To use it, add the following to the `CELERYBEAT_SCHEDULE`
 section in `config.py`:
@@ -558,6 +578,9 @@ object gets unpacked into the
 `sqlalchemy.create_engine <https://docs.sqlalchemy.org/en/latest/core/engines.html#sqlalchemy.create_engine>`_ call,
 while the ``metadata_params`` get unpacked into the
 `sqlalchemy.MetaData <https://docs.sqlalchemy.org/en/rel_1_2/core/metadata.html#sqlalchemy.schema.MetaData>`_ call. Refer to the SQLAlchemy docs for more information.
+
+.. note:: If your using CTAS on SQLLab and PostgreSQL
+    take a look at :ref:`ref_ctas_engine_config` for specific ``engine_params``.
 
 
 Schemas (Postgres & Redshift)
@@ -629,6 +652,37 @@ Note that you can run the ``superset refresh_druid`` command to refresh the
 metadata from your Druid cluster(s)
 
 
+Presto
+------
+
+By default Superset assumes the most recent version of Presto is being used when
+querying the datasource. If you're using an older version of presto, you can configure
+it in the ``extra`` parameter::
+
+    {
+        "version": "0.123"
+    }
+
+
+Exasol
+---------
+
+The connection string for Exasol looks like this ::
+
+    exa+pyodbc://{user}:{password}@{host}
+
+*Note*: It's required to have Exasol ODBC drivers installed for the sqlalchemy dialect to work properly. Exasol ODBC Drivers available are here: https://www.exasol.com/portal/display/DOWNLOAD/Exasol+Download+Section
+
+Example config (odbcinst.ini can be left empty) ::
+
+    $ cat $/.../path/to/odbc.ini
+    [EXAODBC]
+    DRIVER = /.../path/to/driver/EXASOL_driver.so
+    EXAHOST = host:8563
+    EXASCHEMA = main
+
+See `SQLAlchemy for Exasol <https://github.com/blue-yonder/sqlalchemy_exasol>`_.
+
 CORS
 ----
 
@@ -649,7 +703,7 @@ DOMAIN SHARDING
 
 Chrome allows up to 6 open connections per domain at a time. When there are more
 than 6 slices in dashboard, a lot of time fetch requests are queued up and wait for
-next available socket. PR (`#5039 <https://github.com/apache/incubator-superset/pull/5039>`) adds domain sharding to Superset,
+next available socket. `PR 5039 <https://github.com/apache/incubator-superset/pull/5039>`_ adds domain sharding to Superset,
 and this feature will be enabled by configuration only (by default Superset
 doesn't allow cross-domain request).
 
@@ -708,9 +762,9 @@ Example of a simple JSON to Stdout class::
                 print(json.dumps(log))
 
 
-Then on Superset's config reference the class you want to use::
+Then on Superset's config pass an instance of the logger type you want to use.
 
-    EVENT_LOGGER = JSONStdOutEventLogger
+    EVENT_LOGGER = JSONStdOutEventLogger()
 
 
 Upgrading
@@ -718,7 +772,7 @@ Upgrading
 
 Upgrading should be as straightforward as running::
 
-    pip install superset --upgrade
+    pip install apache-superset --upgrade
     superset db upgrade
     superset init
 
@@ -815,6 +869,12 @@ look something like:
     from werkzeug.contrib.cache import RedisCache
     RESULTS_BACKEND = RedisCache(
         host='localhost', port=6379, key_prefix='superset_results')
+
+For performance gains, `MessagePack <https://github.com/msgpack/msgpack-python>`_
+and `PyArrow <https://arrow.apache.org/docs/python/>`_ are now used for results
+serialization. This can be disabled by setting ``RESULTS_BACKEND_USE_MSGPACK = False``
+in your configuration, should any issues arise. Please clear your existing results
+cache store when upgrading an existing environment.
 
 **Important notes**
 
@@ -1024,7 +1084,7 @@ your environment. See `CONTRIBUTING.md#setup-local-environment-for-development <
 Blueprints
 ----------
 
-`Blueprints are Flask's reusable apps <http://flask.pocoo.org/docs/0.12/blueprints/>`_.
+`Blueprints are Flask's reusable apps <https://flask.palletsprojects.com/en/1.0.x/tutorial/views/>`_.
 Superset allows you to specify an array of Blueprints
 in your ``superset_config`` module. Here's
 an example of how this can work with a simple Blueprint. By doing
@@ -1143,3 +1203,30 @@ Then we can add this two lines to ``superset_config.py``:
 
   from custom_sso_security_manager import CustomSsoSecurityManager
   CUSTOM_SECURITY_MANAGER = CustomSsoSecurityManager
+
+Feature Flags
+---------------------------
+
+Because of a wide variety of users, Superset has some features that are not enabled by default. For example, some users have stronger security restrictions, while some others may not. So Superset allow users to enable or disable some features by config. For feature owners, you can add optional functionalities in Superset, but will be only affected by a subset of users.
+
+You can enable or disable features with flag from ``superset_config.py``:
+
+.. code-block:: python
+
+     DEFAULT_FEATURE_FLAGS = {
+         'CLIENT_CACHE': False,
+         'ENABLE_EXPLORE_JSON_CSRF_PROTECTION': False,
+         'PRESTO_EXPAND_DATA': False,
+     }
+
+Here is a list of flags and descriptions:
+
+* ENABLE_EXPLORE_JSON_CSRF_PROTECTION
+
+  * For some security concerns, you may need to enforce CSRF protection on all query request to explore_json endpoint. In Superset, we use `flask-csrf <https://sjl.bitbucket.io/flask-csrf/>`_ add csrf protection for all POST requests, but this protection doesn't apply to GET method.
+
+  * When ENABLE_EXPLORE_JSON_CSRF_PROTECTION is set to true, your users cannot make GET request to explore_json. The default value for this feature False (current behavior), explore_json accepts both GET and POST request. See `PR 7935 <https://github.com/apache/incubator-superset/pull/7935>`_ for more details.
+
+* PRESTO_EXPAND_DATA
+
+  * When this feature is enabled, nested types in Presto will be expanded into extra columns and/or arrays. This is experimental, and doesn't work with all nested types.

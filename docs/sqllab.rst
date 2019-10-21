@@ -56,7 +56,7 @@ Templating with Jinja
 
     SELECT *
     FROM some_table
-    WHERE partition_key = '{{ presto.latest_partition('some_table') }}'
+    WHERE partition_key = '{{ presto.first_latest_partition('some_table') }}'
 
 Templating unleashes the power and capabilities of a
 programming language within your SQL code.
@@ -87,6 +87,8 @@ Superset's Jinja context:
 
 .. autofunction:: superset.jinja_context.filter_values
 
+.. autofunction:: superset.jinja_context.CacheKeyWrapper.cache_key_wrapper
+
 .. autoclass:: superset.jinja_context.PrestoTemplateProcessor
     :members:
 
@@ -101,3 +103,41 @@ it's possible for administrators to expose more more macros in their
 environment using the configuration variable ``JINJA_CONTEXT_ADDONS``.
 All objects referenced in this dictionary will become available for users
 to integrate in their queries in **SQL Lab**.
+
+Query cost estimation
+'''''''''''''''''''''
+
+Some databases support ``EXPLAIN`` queries that allow users to estimate the cost
+of queries before executing this. Currently, Presto is supported in SQL Lab. To
+enable query cost estimation, add the following keys to the "Extra" field in the
+database configuration:
+
+.. code-block:: json
+
+    {
+        "version": "0.319",
+        "cost_estimate_enabled": true,
+        ...
+    }
+
+Here, "version" should be the version of your Presto cluster. Support for this
+functionality was introduced in Presto 0.319.
+
+.. _ref_ctas_engine_config:
+
+Create Table As (CTAS)
+''''''''''''''''''''''
+
+You can use ``CREATE TABLE AS SELECT ...`` statements on SQLLab. This feature can be toggled on
+and off at the database configuration level.
+
+Note that since ``CREATE TABLE..`` belongs to a SQL DDL category. Specifically on PostgreSQL, DDL is transactional,
+this means that to properly use this feature you have to set ``autocommit`` to true on your engine parameters:
+
+.. code-block:: json
+
+    {
+        ...
+        "engine_params": {"isolation_level":"AUTOCOMMIT"},
+        ...
+    }

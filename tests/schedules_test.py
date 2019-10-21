@@ -14,8 +14,8 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-from datetime import datetime, timedelta
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import Mock, patch, PropertyMock
 
 from flask_babel import gettext as __
@@ -35,6 +35,7 @@ from superset.tasks.schedules import (
     deliver_slice,
     next_schedules,
 )
+
 from .utils import read_fixture
 
 
@@ -361,12 +362,16 @@ class SchedulesTestCase(unittest.TestCase):
             element.screenshot_as_png,
         )
 
-    @patch("superset.tasks.schedules.requests.get")
+    @patch("superset.tasks.schedules.urllib.request.OpenerDirector.open")
+    @patch("superset.tasks.schedules.urllib.request.urlopen")
     @patch("superset.tasks.schedules.send_email_smtp")
-    def test_deliver_slice_csv_attachment(self, send_email_smtp, get):
+    def test_deliver_slice_csv_attachment(
+        self, send_email_smtp, mock_open, mock_urlopen
+    ):
         response = Mock()
-        get.return_value = response
-        response.raise_for_status.return_value = None
+        mock_open.return_value = response
+        mock_urlopen.return_value = response
+        mock_urlopen.return_value.getcode.return_value = 200
         response.content = self.CSV
 
         schedule = (
@@ -385,12 +390,14 @@ class SchedulesTestCase(unittest.TestCase):
 
         self.assertEquals(send_email_smtp.call_args[1]["data"][file_name], self.CSV)
 
-    @patch("superset.tasks.schedules.requests.get")
+    @patch("superset.tasks.schedules.urllib.request.urlopen")
+    @patch("superset.tasks.schedules.urllib.request.OpenerDirector.open")
     @patch("superset.tasks.schedules.send_email_smtp")
-    def test_deliver_slice_csv_inline(self, send_email_smtp, get):
+    def test_deliver_slice_csv_inline(self, send_email_smtp, mock_open, mock_urlopen):
         response = Mock()
-        get.return_value = response
-        response.raise_for_status.return_value = None
+        mock_open.return_value = response
+        mock_urlopen.return_value = response
+        mock_urlopen.return_value.getcode.return_value = 200
         response.content = self.CSV
 
         schedule = (

@@ -15,16 +15,18 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint: disable=C,R,W
+import logging
+import re
 from contextlib import closing
 from datetime import datetime, timedelta
-import inspect
-import logging
-import os
-import re
-import traceback
-from typing import Dict, List  # noqa: F401
+from typing import Dict, List, Optional, Union
 from urllib import parse
 
+import backoff
+import msgpack
+import pandas as pd
+import pyarrow as pa
+import simplejson as json
 from flask import (
     abort,
     flash,
@@ -36,52 +38,52 @@ from flask import (
     Response,
     url_for,
 )
-from flask_appbuilder import expose, SimpleFormView
+from flask_appbuilder import expose
 from flask_appbuilder.actions import action
 from flask_appbuilder.models.sqla.interface import SQLAInterface
 from flask_appbuilder.security.decorators import has_access, has_access_api
 from flask_appbuilder.security.sqla import models as ab_models
-from flask_babel import gettext as __
-from flask_babel import lazy_gettext as _
-import pandas as pd
-import simplejson as json
-from sqlalchemy import and_, MetaData, or_, select
-from sqlalchemy.exc import IntegrityError
+from flask_babel import gettext as __, lazy_gettext as _
+from sqlalchemy import and_, or_, select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm.session import Session
 from werkzeug.routing import BaseConverter
-from werkzeug.utils import secure_filename
 
+import superset.models.core as models
 from superset import (
     app,
     appbuilder,
     cache,
     conf,
+    dataframe,
     db,
     event_logger,
     get_feature_flags,
+    is_feature_enabled,
     results_backend,
+    results_backend_use_msgpack,
     security_manager,
     sql_lab,
+    talisman,
     viz,
 )
 from superset.connectors.connector_registry import ConnectorRegistry
-from superset.connectors.sqla.models import AnnotationDatasource, SqlaTable
+from superset.connectors.sqla.models import AnnotationDatasource
 from superset.exceptions import (
     DatabaseNotFound,
     SupersetException,
     SupersetSecurityException,
+    SupersetTimeoutException,
 )
-from superset.forms import CsvToDatabaseForm
 from superset.jinja_context import get_template_processor
-from superset.legacy import update_time_range
-import superset.models.core as models
 from superset.models.sql_lab import Query
 from superset.models.user_attributes import UserAttribute
 from superset.sql_parse import ParsedQuery
 from superset.sql_validators import get_validator_by_name
-from superset.utils import core as utils
-from superset.utils import dashboard_import_export
+from superset.utils import core as utils, dashboard_import_export
 from superset.utils.dates import now_as_float
-from superset.utils.decorators import etag_cache
+from superset.utils.decorators import etag_cache, stats_timing
+
 from .base import (
     api,
     BaseSupersetView,
@@ -97,8 +99,8 @@ from .base import (
     json_success,
     SupersetFilter,
     SupersetModelView,
-    YamlExportMixin,
 )
+from .database import api as database_api, views as in_views
 from .utils import (
     apply_display_max_row_limit,
     bootstrap_user_data,
@@ -109,6 +111,9 @@ from .utils import (
 
 config = app.config
 CACHE_DEFAULT_TIMEOUT = config.get("CACHE_DEFAULT_TIMEOUT", 0)
+SQLLAB_QUERY_COST_ESTIMATE_TIMEOUT = config.get(
+    "SQLLAB_QUERY_COST_ESTIMATE_TIMEOUT", 10
+)
 stats_logger = config.get("STATS_LOGGER")
 DAR = models.DatasourceAccessRequest
 QueryStatus = utils.QueryStatus
@@ -169,7 +174,7 @@ def check_datasource_perms(
         force=False,
     )
 
-    security_manager.assert_datasource_permission(viz_obj.datasource)
+    security_manager.assert_viz_permission(viz_obj)
 
 
 def check_slice_perms(self, slice_id):
@@ -178,34 +183,58 @@ def check_slice_perms(self, slice_id):
 
     This function takes `self` since it must have the same signature as the
     the decorated method.
-
     """
+
     form_data, slc = get_form_data(slice_id, use_slice_data=True)
-    datasource_type = slc.datasource.type
-    datasource_id = slc.datasource.id
+
     viz_obj = get_viz(
-        datasource_type=datasource_type,
-        datasource_id=datasource_id,
+        datasource_type=slc.datasource.type,
+        datasource_id=slc.datasource.id,
         form_data=form_data,
         force=False,
     )
-    security_manager.assert_datasource_permission(viz_obj.datasource)
+
+    security_manager.assert_viz_permission(viz_obj)
+
+
+def _deserialize_results_payload(
+    payload: Union[bytes, str], query, use_msgpack: Optional[bool] = False
+) -> dict:
+    logging.debug(f"Deserializing from msgpack: {use_msgpack}")
+    if use_msgpack:
+        with stats_timing(
+            "sqllab.query.results_backend_msgpack_deserialize", stats_logger
+        ):
+            ds_payload = msgpack.loads(payload, raw=False)
+
+        with stats_timing("sqllab.query.results_backend_pa_deserialize", stats_logger):
+            df = pa.deserialize(ds_payload["data"])
+
+        # TODO: optimize this, perhaps via df.to_dict, then traversing
+        ds_payload["data"] = dataframe.SupersetDataFrame.format_data(df) or []
+
+        db_engine_spec = query.database.db_engine_spec
+        all_columns, data, expanded_columns = db_engine_spec.expand_data(
+            ds_payload["selected_columns"], ds_payload["data"]
+        )
+        ds_payload.update(
+            {"data": data, "columns": all_columns, "expanded_columns": expanded_columns}
+        )
+
+        return ds_payload
+    else:
+        with stats_timing(
+            "sqllab.query.results_backend_json_deserialize", stats_logger
+        ):
+            return json.loads(payload)  # type: ignore
 
 
 class SliceFilter(SupersetFilter):
-    def apply(self, query, func):  # noqa
+    def apply(self, query, func):
         if security_manager.all_datasource_access():
             return query
         perms = self.get_view_menus("datasource_access")
         # TODO(bogdan): add `schema_access` support here
-        return query.filter(self.model.perm.in_(perms))
-
-
-class DatabaseFilter(SupersetFilter):
-    def apply(self, query, func):  # noqa
-        if security_manager.all_database_access():
-            return query
-        perms = self.get_view_menus("database_access")
         return query.filter(self.model.perm.in_(perms))
 
 
@@ -221,10 +250,10 @@ class DashboardFilter(SupersetFilter):
     if they wish to see those dashboards which are published first
     """
 
-    def apply(self, query, func):  # noqa
+    def apply(self, query, func):
         Dash = models.Dashboard
         User = ab_models.User
-        Slice = models.Slice  # noqa
+        Slice = models.Slice
         Favorites = models.FavStar
 
         user_roles = [role.name.lower() for role in list(self.get_user_roles())]
@@ -238,7 +267,7 @@ class DashboardFilter(SupersetFilter):
             .join(Dash.slices)
             .filter(
                 and_(
-                    Dash.published == True,  # noqa
+                    Dash.published == True,
                     or_(Slice.perm.in_(datasource_perms), all_datasource_access),
                 )
             )
@@ -265,337 +294,6 @@ class DashboardFilter(SupersetFilter):
         )
 
         return query
-
-
-class DatabaseView(SupersetModelView, DeleteMixin, YamlExportMixin):  # noqa
-    datamodel = SQLAInterface(models.Database)
-
-    list_title = _("Databases")
-    show_title = _("Show Database")
-    add_title = _("Add Database")
-    edit_title = _("Edit Database")
-
-    list_columns = [
-        "database_name",
-        "backend",
-        "allow_run_async",
-        "allow_dml",
-        "allow_csv_upload",
-        "expose_in_sqllab",
-        "creator",
-        "modified",
-    ]
-    order_columns = [
-        "database_name",
-        "allow_run_async",
-        "allow_dml",
-        "modified",
-        "allow_csv_upload",
-        "expose_in_sqllab",
-    ]
-    add_columns = [
-        "database_name",
-        "sqlalchemy_uri",
-        "cache_timeout",
-        "expose_in_sqllab",
-        "allow_run_async",
-        "allow_csv_upload",
-        "allow_ctas",
-        "allow_dml",
-        "force_ctas_schema",
-        "impersonate_user",
-        "allow_multi_schema_metadata_fetch",
-        "extra",
-    ]
-    search_exclude_columns = (
-        "password",
-        "tables",
-        "created_by",
-        "changed_by",
-        "queries",
-        "saved_queries",
-    )
-    edit_columns = add_columns
-    show_columns = [
-        "tables",
-        "cache_timeout",
-        "extra",
-        "database_name",
-        "sqlalchemy_uri",
-        "perm",
-        "created_by",
-        "created_on",
-        "changed_by",
-        "changed_on",
-    ]
-    add_template = "superset/models/database/add.html"
-    edit_template = "superset/models/database/edit.html"
-    base_order = ("changed_on", "desc")
-    description_columns = {
-        "sqlalchemy_uri": utils.markdown(
-            "Refer to the "
-            "[SqlAlchemy docs]"
-            "(https://docs.sqlalchemy.org/en/rel_1_2/core/engines.html#"
-            "database-urls) "
-            "for more information on how to structure your URI.",
-            True,
-        ),
-        "expose_in_sqllab": _("Expose this DB in SQL Lab"),
-        "allow_run_async": _(
-            "Operate the database in asynchronous mode, meaning  "
-            "that the queries are executed on remote workers as opposed "
-            "to on the web server itself. "
-            "This assumes that you have a Celery worker setup as well "
-            "as a results backend. Refer to the installation docs "
-            "for more information."
-        ),
-        "allow_ctas": _("Allow CREATE TABLE AS option in SQL Lab"),
-        "allow_dml": _(
-            "Allow users to run non-SELECT statements "
-            "(UPDATE, DELETE, CREATE, ...) "
-            "in SQL Lab"
-        ),
-        "force_ctas_schema": _(
-            "When allowing CREATE TABLE AS option in SQL Lab, "
-            "this option forces the table to be created in this schema"
-        ),
-        "extra": utils.markdown(
-            "JSON string containing extra configuration elements.<br/>"
-            "1. The ``engine_params`` object gets unpacked into the "
-            "[sqlalchemy.create_engine]"
-            "(https://docs.sqlalchemy.org/en/latest/core/engines.html#"
-            "sqlalchemy.create_engine) call, while the ``metadata_params`` "
-            "gets unpacked into the [sqlalchemy.MetaData]"
-            "(https://docs.sqlalchemy.org/en/rel_1_0/core/metadata.html"
-            "#sqlalchemy.schema.MetaData) call.<br/>"
-            "2. The ``metadata_cache_timeout`` is a cache timeout setting "
-            "in seconds for metadata fetch of this database. Specify it as "
-            '**"metadata_cache_timeout": {"schema_cache_timeout": 600, '
-            '"table_cache_timeout": 600}**. '
-            "If unset, cache will not be enabled for the functionality. "
-            "A timeout of 0 indicates that the cache never expires.<br/>"
-            "3. The ``schemas_allowed_for_csv_upload`` is a comma separated list "
-            "of schemas that CSVs are allowed to upload to. "
-            'Specify it as **"schemas_allowed_for_csv_upload": '
-            '["public", "csv_upload"]**. '
-            "If database flavor does not support schema or any schema is allowed "
-            "to be accessed, just leave the list empty",
-            True,
-        ),
-        "impersonate_user": _(
-            "If Presto, all the queries in SQL Lab are going to be executed as the "
-            "currently logged on user who must have permission to run them.<br/>"
-            "If Hive and hive.server2.enable.doAs is enabled, will run the queries as "
-            "service account, but impersonate the currently logged on user "
-            "via hive.server2.proxy.user property."
-        ),
-        "allow_multi_schema_metadata_fetch": _(
-            "Allow SQL Lab to fetch a list of all tables and all views across "
-            "all database schemas. For large data warehouse with thousands of "
-            "tables, this can be expensive and put strain on the system."
-        ),
-        "cache_timeout": _(
-            "Duration (in seconds) of the caching timeout for charts of this database. "
-            "A timeout of 0 indicates that the cache never expires. "
-            "Note this defaults to the global timeout if undefined."
-        ),
-        "allow_csv_upload": _(
-            "If selected, please set the schemas allowed for csv upload in Extra."
-        ),
-    }
-    base_filters = [["id", DatabaseFilter, lambda: []]]
-    label_columns = {
-        "expose_in_sqllab": _("Expose in SQL Lab"),
-        "allow_ctas": _("Allow CREATE TABLE AS"),
-        "allow_dml": _("Allow DML"),
-        "force_ctas_schema": _("CTAS Schema"),
-        "database_name": _("Database"),
-        "creator": _("Creator"),
-        "changed_on_": _("Last Changed"),
-        "sqlalchemy_uri": _("SQLAlchemy URI"),
-        "cache_timeout": _("Chart Cache Timeout"),
-        "extra": _("Extra"),
-        "allow_run_async": _("Asynchronous Query Execution"),
-        "impersonate_user": _("Impersonate the logged on user"),
-        "allow_csv_upload": _("Allow Csv Upload"),
-        "modified": _("Modified"),
-        "allow_multi_schema_metadata_fetch": _("Allow Multi Schema Metadata Fetch"),
-        "backend": _("Backend"),
-    }
-
-    def pre_add(self, db):
-        self.check_extra(db)
-        db.set_sqlalchemy_uri(db.sqlalchemy_uri)
-        security_manager.add_permission_view_menu("database_access", db.perm)
-        # adding a new database we always want to force refresh schema list
-        for schema in db.get_all_schema_names():
-            security_manager.add_permission_view_menu(
-                "schema_access", security_manager.get_schema_perm(db, schema)
-            )
-
-    def pre_update(self, db):
-        self.pre_add(db)
-
-    def pre_delete(self, obj):
-        if obj.tables:
-            raise SupersetException(
-                Markup(
-                    "Cannot delete a database that has tables attached. "
-                    "Here's the list of associated tables: "
-                    + ", ".join("{}".format(o) for o in obj.tables)
-                )
-            )
-
-    def _delete(self, pk):
-        DeleteMixin._delete(self, pk)
-
-    def check_extra(self, db):
-        # this will check whether json.loads(extra) can succeed
-        try:
-            extra = db.get_extra()
-        except Exception as e:
-            raise Exception("Extra field cannot be decoded by JSON. {}".format(str(e)))
-
-        # this will check whether 'metadata_params' is configured correctly
-        metadata_signature = inspect.signature(MetaData)
-        for key in extra.get("metadata_params", {}):
-            if key not in metadata_signature.parameters:
-                raise Exception(
-                    "The metadata_params in Extra field "
-                    "is not configured correctly. The key "
-                    "{} is invalid.".format(key)
-                )
-
-
-appbuilder.add_link(
-    "Import Dashboards",
-    label=__("Import Dashboards"),
-    href="/superset/import_dashboards",
-    icon="fa-cloud-upload",
-    category="Manage",
-    category_label=__("Manage"),
-    category_icon="fa-wrench",
-)
-
-
-appbuilder.add_view(
-    DatabaseView,
-    "Databases",
-    label=__("Databases"),
-    icon="fa-database",
-    category="Sources",
-    category_label=__("Sources"),
-    category_icon="fa-database",
-)
-
-
-class DatabaseAsync(DatabaseView):
-    list_columns = [
-        "id",
-        "database_name",
-        "expose_in_sqllab",
-        "allow_ctas",
-        "force_ctas_schema",
-        "allow_run_async",
-        "allow_dml",
-        "allow_multi_schema_metadata_fetch",
-        "allow_csv_upload",
-        "allows_subquery",
-        "backend",
-    ]
-
-
-appbuilder.add_view_no_menu(DatabaseAsync)
-
-
-class CsvToDatabaseView(SimpleFormView):
-    form = CsvToDatabaseForm
-    form_template = "superset/form_view/csv_to_database_view/edit.html"
-    form_title = _("CSV to Database configuration")
-    add_columns = ["database", "schema", "table_name"]
-
-    def form_get(self, form):
-        form.sep.data = ","
-        form.header.data = 0
-        form.mangle_dupe_cols.data = True
-        form.skipinitialspace.data = False
-        form.skip_blank_lines.data = True
-        form.infer_datetime_format.data = True
-        form.decimal.data = "."
-        form.if_exists.data = "fail"
-
-    def form_post(self, form):
-        database = form.con.data
-        schema_name = form.schema.data or ""
-
-        if not self.is_schema_allowed(database, schema_name):
-            message = _(
-                'Database "{0}" Schema "{1}" is not allowed for csv uploads. '
-                "Please contact Superset Admin".format(
-                    database.database_name, schema_name
-                )
-            )
-            flash(message, "danger")
-            return redirect("/csvtodatabaseview/form")
-
-        csv_file = form.csv_file.data
-        form.csv_file.data.filename = secure_filename(form.csv_file.data.filename)
-        csv_filename = form.csv_file.data.filename
-        path = os.path.join(config["UPLOAD_FOLDER"], csv_filename)
-        try:
-            utils.ensure_path_exists(config["UPLOAD_FOLDER"])
-            csv_file.save(path)
-            table = SqlaTable(table_name=form.name.data)
-            table.database = form.data.get("con")
-            table.database_id = table.database.id
-            table.database.db_engine_spec.create_table_from_csv(form, table)
-        except Exception as e:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-            message = (
-                "Table name {} already exists. Please pick another".format(
-                    form.name.data
-                )
-                if isinstance(e, IntegrityError)
-                else str(e)
-            )
-            flash(message, "danger")
-            stats_logger.incr("failed_csv_upload")
-            return redirect("/csvtodatabaseview/form")
-
-        os.remove(path)
-        # Go back to welcome page / splash screen
-        db_name = table.database.database_name
-        message = _(
-            'CSV file "{0}" uploaded to table "{1}" in '
-            'database "{2}"'.format(csv_filename, form.name.data, db_name)
-        )
-        flash(message, "info")
-        stats_logger.incr("successful_csv_upload")
-        return redirect("/tablemodelview/list/")
-
-    def is_schema_allowed(self, database, schema):
-        if not database.allow_csv_upload:
-            return False
-        schemas = database.get_schema_access_for_csv_upload()
-        if schemas:
-            return schema in schemas
-        return (
-            security_manager.database_access(database)
-            or security_manager.all_datasource_access()
-        )
-
-
-appbuilder.add_view_no_menu(CsvToDatabaseView)
-
-
-class DatabaseTablesAsync(DatabaseView):
-    list_columns = ["id", "all_table_names_in_database", "all_schema_names"]
-
-
-appbuilder.add_view_no_menu(DatabaseTablesAsync)
 
 
 if config.get("ENABLE_ACCESS_REQUEST"):
@@ -630,7 +328,7 @@ if config.get("ENABLE_ACCESS_REQUEST"):
     )
 
 
-class SliceModelView(SupersetModelView, DeleteMixin):  # noqa
+class SliceModelView(SupersetModelView, DeleteMixin):
     route_base = "/chart"
     datamodel = SQLAInterface(models.Slice)
 
@@ -732,7 +430,7 @@ appbuilder.add_view(
 )
 
 
-class SliceAsync(SliceModelView):  # noqa
+class SliceAsync(SliceModelView):
     route_base = "/sliceasync"
     list_columns = [
         "id",
@@ -750,7 +448,7 @@ class SliceAsync(SliceModelView):  # noqa
 appbuilder.add_view_no_menu(SliceAsync)
 
 
-class SliceAddView(SliceModelView):  # noqa
+class SliceAddView(SliceModelView):
     route_base = "/sliceaddview"
     list_columns = [
         "id",
@@ -775,7 +473,7 @@ class SliceAddView(SliceModelView):  # noqa
 appbuilder.add_view_no_menu(SliceAddView)
 
 
-class DashboardModelView(SupersetModelView, DeleteMixin):  # noqa
+class DashboardModelView(SupersetModelView, DeleteMixin):
     route_base = "/dashboard"
     datamodel = SQLAInterface(models.Dashboard)
 
@@ -893,7 +591,7 @@ appbuilder.add_view(
 )
 
 
-class DashboardModelViewAsync(DashboardModelView):  # noqa
+class DashboardModelViewAsync(DashboardModelView):
     route_base = "/dashboardasync"
     list_columns = [
         "id",
@@ -916,7 +614,7 @@ class DashboardModelViewAsync(DashboardModelView):  # noqa
 appbuilder.add_view_no_menu(DashboardModelViewAsync)
 
 
-class DashboardAddView(DashboardModelView):  # noqa
+class DashboardAddView(DashboardModelView):
     route_base = "/dashboardaddview"
     list_columns = [
         "id",
@@ -934,45 +632,19 @@ class DashboardAddView(DashboardModelView):  # noqa
 appbuilder.add_view_no_menu(DashboardAddView)
 
 
-class LogModelView(SupersetModelView):
-    datamodel = SQLAInterface(models.Log)
-
-    list_title = _("Logs")
-    show_title = _("Show Log")
-    add_title = _("Add Log")
-    edit_title = _("Edit Log")
-
-    list_columns = ("user", "action", "dttm")
-    edit_columns = ("user", "action", "dttm", "json")
-    base_order = ("dttm", "desc")
-    label_columns = {
-        "user": _("User"),
-        "action": _("Action"),
-        "dttm": _("dttm"),
-        "json": _("JSON"),
-    }
-
-
-appbuilder.add_view(
-    LogModelView,
-    "Action Log",
-    label=__("Action Log"),
-    category="Security",
-    category_label=__("Security"),
-    icon="fa-list-ol",
-)
-
-
+@talisman(force_https=False)
 @app.route("/health")
 def health():
     return "OK"
 
 
+@talisman(force_https=False)
 @app.route("/healthcheck")
 def healthcheck():
     return "OK"
 
 
+@talisman(force_https=False)
 @app.route("/ping")
 def ping():
     return "OK"
@@ -1259,54 +931,6 @@ class Superset(BaseSupersetView):
         session.commit()
         return redirect("/accessrequestsmodelview/list/")
 
-    def get_form_data(self, slice_id=None, use_slice_data=False):
-        form_data = {}
-        post_data = request.form.get("form_data")
-        request_args_data = request.args.get("form_data")
-        # Supporting POST
-        if post_data:
-            form_data.update(json.loads(post_data))
-        # request params can overwrite post body
-        if request_args_data:
-            form_data.update(json.loads(request_args_data))
-
-        url_id = request.args.get("r")
-        if url_id:
-            saved_url = db.session.query(models.Url).filter_by(id=url_id).first()
-            if saved_url:
-                url_str = parse.unquote_plus(
-                    saved_url.url.split("?")[1][10:], encoding="utf-8", errors=None
-                )
-                url_form_data = json.loads(url_str)
-                # allow form_date in request override saved url
-                url_form_data.update(form_data)
-                form_data = url_form_data
-
-        form_data = {
-            k: v for k, v in form_data.items() if k not in FORM_DATA_KEY_BLACKLIST
-        }
-
-        # When a slice_id is present, load from DB and override
-        # the form_data from the DB with the other form_data provided
-        slice_id = form_data.get("slice_id") or slice_id
-        slc = None
-
-        # Check if form data only contains slice_id
-        contains_only_slc_id = not any(key != "slice_id" for key in form_data)
-
-        # Include the slice_form_data if request from explore or slice calls
-        # or if form_data only contains slice_id
-        if slice_id and (use_slice_data or contains_only_slc_id):
-            slc = db.session.query(models.Slice).filter_by(id=slice_id).one_or_none()
-            if slc:
-                slice_form_data = slc.form_data.copy()
-                slice_form_data.update(form_data)
-                form_data = slice_form_data
-
-        update_time_range(form_data)
-
-        return form_data, slc
-
     def get_viz(
         self,
         slice_id=None,
@@ -1351,12 +975,7 @@ class Superset(BaseSupersetView):
             logging.exception(e)
             return json_error_response(e)
 
-        if query_obj and query_obj["prequeries"]:
-            query_obj["prequeries"].append(query)
-            query = ";\n\n".join(query_obj["prequeries"])
-        if query:
-            query += ";"
-        else:
+        if not query:
             query = "No query."
 
         return self.json_response(
@@ -1424,12 +1043,18 @@ class Superset(BaseSupersetView):
         payload = viz_obj.get_payload()
         return data_payload_response(*viz_obj.payload_json_and_has_error(payload))
 
+    EXPLORE_JSON_METHODS = ["POST"]
+    if not is_feature_enabled("ENABLE_EXPLORE_JSON_CSRF_PROTECTION"):
+        EXPLORE_JSON_METHODS.append("GET")
+
     @event_logger.log_this
     @api
     @has_access_api
     @handle_api_exception
-    @expose("/explore_json/<datasource_type>/<datasource_id>/", methods=["GET", "POST"])
-    @expose("/explore_json/", methods=["GET", "POST"])
+    @expose(
+        "/explore_json/<datasource_type>/<datasource_id>/", methods=EXPLORE_JSON_METHODS
+    )
+    @expose("/explore_json/", methods=EXPLORE_JSON_METHODS)
     @etag_cache(CACHE_DEFAULT_TIMEOUT, check_perms=check_datasource_perms)
     def explore_json(self, datasource_type=None, datasource_id=None):
         """Serves all request that GET or POST form_data
@@ -1880,6 +1505,7 @@ class Superset(BaseSupersetView):
                 "schema": tn.schema,
                 "label": get_datasource_label(tn),
                 "title": get_datasource_label(tn),
+                "type": "table",
             }
             for tn in tables[:max_tables]
         ]
@@ -1888,12 +1514,14 @@ class Superset(BaseSupersetView):
                 {
                     "value": vn.table,
                     "schema": vn.schema,
-                    "label": f"[view] {get_datasource_label(vn)}",
-                    "title": f"[view] {get_datasource_label(vn)}",
+                    "label": get_datasource_label(vn),
+                    "title": get_datasource_label(vn),
+                    "type": "view",
                 }
                 for vn in views[:max_views]
             ]
         )
+        table_options.sort(key=lambda value: value["label"])
         payload = {"tableLength": len(tables) + len(views), "options": table_options}
         return json_success(json.dumps(payload))
 
@@ -1968,28 +1596,31 @@ class Superset(BaseSupersetView):
         slice_ids = []
         slice_id_to_name = {}
         for value in positions.values():
-            if (
-                isinstance(value, dict)
-                and value.get("meta")
-                and value.get("meta").get("chartId")
-            ):
-                slice_id = value.get("meta").get("chartId")
-                slice_ids.append(slice_id)
-                slice_id_to_name[slice_id] = value.get("meta").get("sliceName")
+            if isinstance(value, dict):
+                try:
+                    slice_id = value["meta"]["chartId"]
+                    slice_ids.append(slice_id)
+                    slice_id_to_name[slice_id] = value["meta"]["sliceName"]
+                except KeyError:
+                    pass
 
         session = db.session()
-        Slice = models.Slice  # noqa
+        Slice = models.Slice
         current_slices = session.query(Slice).filter(Slice.id.in_(slice_ids)).all()
 
         dashboard.slices = current_slices
 
         # update slice names. this assumes user has permissions to update the slice
+        # we allow user set slice name be empty string
         for slc in dashboard.slices:
-            new_name = slice_id_to_name[slc.id]
-            if slc.slice_name != new_name:
-                slc.slice_name = new_name
-                session.merge(slc)
-                session.flush()
+            try:
+                new_name = slice_id_to_name[slc.id]
+                if slc.slice_name != new_name:
+                    slc.slice_name = new_name
+                    session.merge(slc)
+                    session.flush()
+            except KeyError:
+                pass
 
         # remove leading and trailing white spaces in the dumped json
         dashboard.position_json = json.dumps(
@@ -2027,7 +1658,7 @@ class Superset(BaseSupersetView):
         """Add and save slices to a dashboard"""
         data = json.loads(request.form.get("data"))
         session = db.session()
-        Slice = models.Slice  # noqa
+        Slice = models.Slice
         dash = session.query(models.Dashboard).filter_by(id=dashboard_id).first()
         check_ownership(dash, raise_if_false=True)
         new_slices = session.query(Slice).filter(Slice.id.in_(data["slice_ids"]))
@@ -2084,7 +1715,7 @@ class Superset(BaseSupersetView):
     @expose("/recent_activity/<user_id>/", methods=["GET"])
     def recent_activity(self, user_id):
         """Recent activity (actions) for a given user"""
-        M = models  # noqa
+        M = models
 
         if request.args.get("limit"):
             limit = int(request.args.get("limit"))
@@ -2190,7 +1821,7 @@ class Superset(BaseSupersetView):
     @has_access_api
     @expose("/created_dashboards/<user_id>/", methods=["GET"])
     def created_dashboards(self, user_id):
-        Dash = models.Dashboard  # noqa
+        Dash = models.Dashboard
         qry = (
             db.session.query(Dash)
             .filter(or_(Dash.created_by_fk == user_id, Dash.changed_by_fk == user_id))
@@ -2216,8 +1847,8 @@ class Superset(BaseSupersetView):
         """List of slices a user created, or faved"""
         if not user_id:
             user_id = g.user.id
-        Slice = models.Slice  # noqa
-        FavStar = models.FavStar  # noqa
+        Slice = models.Slice
+        FavStar = models.FavStar
         qry = (
             db.session.query(Slice, FavStar.dttm)
             .join(
@@ -2259,7 +1890,7 @@ class Superset(BaseSupersetView):
         """List of slices created by this user"""
         if not user_id:
             user_id = g.user.id
-        Slice = models.Slice  # noqa
+        Slice = models.Slice
         qry = (
             db.session.query(Slice)
             .filter(or_(Slice.created_by_fk == user_id, Slice.changed_by_fk == user_id))
@@ -2389,7 +2020,7 @@ class Superset(BaseSupersetView):
     def favstar(self, class_name, obj_id, action):
         """Toggle favorite stars on Slices and Dashboard"""
         session = db.session()
-        FavStar = models.FavStar  # noqa
+        FavStar = models.FavStar
         count = 0
         favs = (
             session.query(FavStar)
@@ -2421,7 +2052,7 @@ class Superset(BaseSupersetView):
     def publish(self, dashboard_id):
         """Gets and toggles published status on dashboards"""
         session = db.session()
-        Dashboard = models.Dashboard  # noqa
+        Dashboard = models.Dashboard
         Role = ab_models.Role
         dash = (
             session.query(Dashboard).filter(Dashboard.id == dashboard_id).one_or_none()
@@ -2496,7 +2127,7 @@ class Superset(BaseSupersetView):
 
         # Hack to log the dashboard_id properly, even when getting a slug
         @event_logger.log_this
-        def dashboard(**kwargs):  # noqa
+        def dashboard(**kwargs):
             pass
 
         dashboard(
@@ -2634,7 +2265,7 @@ class Superset(BaseSupersetView):
         table.columns = cols
         table.metrics = [SqlMetric(metric_name="count", expression="count(*)")]
         db.session.commit()
-        return self.json_response(json.dumps({"table_id": table.id}))
+        return json_success(json.dumps({"table_id": table.id}))
 
     @has_access
     @expose("/table/<database_id>/<table_name>/<schema>/")
@@ -2722,6 +2353,34 @@ class Superset(BaseSupersetView):
             mydb.select_star(table_name, schema, latest_partition=True, show_cols=True)
         )
 
+    @has_access_api
+    @expose("/estimate_query_cost/<database_id>/", methods=["POST"])
+    @expose("/estimate_query_cost/<database_id>/<schema>/", methods=["POST"])
+    @event_logger.log_this
+    def estimate_query_cost(self, database_id: int, schema: str = None) -> Response:
+        mydb = db.session.query(models.Database).filter_by(id=database_id).one_or_none()
+
+        sql = json.loads(request.form.get("sql", '""'))
+        template_params = json.loads(request.form.get("templateParams") or "{}")
+        if template_params:
+            template_processor = get_template_processor(mydb)
+            sql = template_processor.process_template(sql, **template_params)
+
+        timeout = SQLLAB_QUERY_COST_ESTIMATE_TIMEOUT
+        timeout_msg = f"The estimation exceeded the {timeout} seconds timeout."
+        try:
+            with utils.timeout(seconds=timeout, error_message=timeout_msg):
+                cost = mydb.db_engine_spec.estimate_query_cost(
+                    mydb, schema, sql, utils.sources.get("sql_lab")
+                )
+        except SupersetTimeoutException as e:
+            logging.exception(e)
+            return json_error_response(timeout_msg)
+        except Exception as e:
+            return json_error_response(str(e))
+
+        return json_success(json.dumps(cost))
+
     @expose("/theme/")
     def theme(self):
         return self.render_template("superset/theme.html")
@@ -2765,24 +2424,27 @@ class Superset(BaseSupersetView):
                 status=410,
             )
 
-        query = db.session.query(Query).filter_by(results_key=key).one()
-        rejected_tables = security_manager.rejected_datasources(
+        query = db.session.query(Query).filter_by(results_key=key).one_or_none()
+        if query is None:
+            return json_error_response(
+                "Data could not be retrieved. You may want to re-run the query.",
+                status=404,
+            )
+
+        rejected_tables = security_manager.rejected_tables(
             query.sql, query.database, query.schema
         )
         if rejected_tables:
             return json_error_response(
-                security_manager.get_table_access_error_msg(
-                    "{}".format(rejected_tables)
-                ),
-                status=403,
+                security_manager.get_table_access_error_msg(rejected_tables), status=403
             )
 
-        payload = utils.zlib_decompress_to_string(blob)
-        payload_json = json.loads(payload)
+        payload = utils.zlib_decompress(blob, decode=not results_backend_use_msgpack)
+        obj = _deserialize_results_payload(payload, query, results_backend_use_msgpack)
 
         return json_success(
             json.dumps(
-                apply_display_max_row_limit(payload_json),
+                apply_display_max_row_limit(obj),
                 default=utils.json_iso_dttm_ser,
                 ignore_nan=True,
             )
@@ -2791,14 +2453,30 @@ class Superset(BaseSupersetView):
     @has_access_api
     @expose("/stop_query/", methods=["POST"])
     @event_logger.log_this
+    @backoff.on_exception(
+        backoff.constant,
+        Exception,
+        interval=1,
+        on_backoff=lambda details: db.session.rollback(),
+        on_giveup=lambda details: db.session.rollback(),
+        max_tries=5,
+    )
     def stop_query(self):
         client_id = request.form.get("client_id")
-        try:
-            query = db.session.query(Query).filter_by(client_id=client_id).one()
-            query.status = QueryStatus.STOPPED
-            db.session.commit()
-        except Exception:
-            pass
+
+        query = db.session.query(Query).filter_by(client_id=client_id).one()
+        if query.status in [
+            QueryStatus.FAILED,
+            QueryStatus.SUCCESS,
+            QueryStatus.TIMED_OUT,
+        ]:
+            logging.error(
+                f"Query with client_id {client_id} could not be stopped: query already complete"
+            )
+            return self.json_response("OK")
+        query.status = QueryStatus.STOPPED
+        db.session.commit()
+
         return self.json_response("OK")
 
     @has_access_api
@@ -2822,9 +2500,9 @@ class Superset(BaseSupersetView):
             )
 
         session = db.session()
-        mydb = session.query(models.Database).filter_by(id=database_id).first()
+        mydb = session.query(models.Database).filter_by(id=database_id).one_or_none()
         if not mydb:
-            json_error_response(
+            return json_error_response(
                 "Database with id {} is missing.".format(database_id), status=400
             )
 
@@ -2864,128 +2542,67 @@ class Superset(BaseSupersetView):
             )
             return json_error_response(f"{msg}")
 
-    @has_access_api
-    @expose("/sql_json/", methods=["POST", "GET"])
-    @event_logger.log_this
-    def sql_json(self):
-        """Runs arbitrary sql and returns and json"""
-        async_ = request.form.get("runAsync") == "true"
-        sql = request.form.get("sql")
-        database_id = request.form.get("database_id")
-        schema = request.form.get("schema") or None
-        template_params = json.loads(request.form.get("templateParams") or "{}")
-        limit = int(request.form.get("queryLimit", 0))
-        if limit < 0:
-            logging.warning(
-                "Invalid limit of {} specified. Defaulting to max limit.".format(limit)
-            )
-            limit = 0
-        limit = limit or app.config.get("SQL_MAX_ROW")
+    def _sql_json_async(
+        self, session: Session, rendered_query: str, query: Query
+    ) -> str:
+        """
+            Send SQL JSON query to celery workers
 
-        session = db.session()
-        mydb = session.query(models.Database).filter_by(id=database_id).first()
-
-        if not mydb:
-            json_error_response("Database with id {} is missing.".format(database_id))
-
-        rejected_tables = security_manager.rejected_datasources(sql, mydb, schema)
-        if rejected_tables:
-            return json_error_response(
-                security_manager.get_table_access_error_msg(rejected_tables),
-                link=security_manager.get_table_access_link(rejected_tables),
-                status=403,
-            )
-        session.commit()
-
-        select_as_cta = request.form.get("select_as_cta") == "true"
-        tmp_table_name = request.form.get("tmp_table_name")
-        if select_as_cta and mydb.force_ctas_schema:
-            tmp_table_name = "{}.{}".format(mydb.force_ctas_schema, tmp_table_name)
-
-        client_id = request.form.get("client_id") or utils.shortid()[:10]
-        query = Query(
-            database_id=int(database_id),
-            sql=sql,
-            schema=schema,
-            select_as_cta=select_as_cta,
-            start_time=now_as_float(),
-            tab_name=request.form.get("tab"),
-            status=QueryStatus.PENDING if async_ else QueryStatus.RUNNING,
-            sql_editor_id=request.form.get("sql_editor_id"),
-            tmp_table_name=tmp_table_name,
-            user_id=g.user.get_id() if g.user else None,
-            client_id=client_id,
-        )
-        session.add(query)
-        session.flush()
-        query_id = query.id
-        session.commit()  # shouldn't be necessary
-        if not query_id:
-            raise Exception(_("Query record was not created as expected."))
-        logging.info("Triggering query_id: {}".format(query_id))
-
+        :param session: SQLAlchemy session object
+        :param rendered_query: the rendered query to perform by workers
+        :param query: The query (SQLAlchemy) object
+        :return: String JSON response
+        """
+        logging.info(f"Query {query.id}: Running query on a Celery worker")
+        # Ignore the celery future object and the request may time out.
         try:
-            template_processor = get_template_processor(
-                database=query.database, query=query
-            )
-            rendered_query = template_processor.process_template(
-                query.sql, **template_params
+            sql_lab.get_sql_results.delay(
+                query.id,
+                rendered_query,
+                return_results=False,
+                store_results=not query.select_as_cta,
+                user_name=g.user.username if g.user else None,
+                start_time=now_as_float(),
             )
         except Exception as e:
-            return json_error_response(
-                "Template rendering failed: {}".format(
-                    utils.error_msg_from_exception(e)
-                )
+            logging.exception(f"Query {query.id}: {e}")
+            msg = _(
+                "Failed to start remote query on a worker. "
+                "Tell your administrator to verify the availability of "
+                "the message queue."
             )
-
-        # set LIMIT after template processing
-        limits = [mydb.db_engine_spec.get_limit_from_sql(rendered_query), limit]
-        query.limit = min(lim for lim in limits if lim is not None)
-
-        # Async request.
-        if async_:
-            logging.info("Running query on a Celery worker")
-            # Ignore the celery future object and the request may time out.
-            try:
-                sql_lab.get_sql_results.delay(
-                    query_id,
-                    rendered_query,
-                    return_results=False,
-                    store_results=not query.select_as_cta,
-                    user_name=g.user.username if g.user else None,
-                    start_time=now_as_float(),
-                )
-            except Exception as e:
-                logging.exception(e)
-                msg = _(
-                    "Failed to start remote query on a worker. "
-                    "Tell your administrator to verify the availability of "
-                    "the message queue."
-                )
-                query.status = QueryStatus.FAILED
-                query.error_message = msg
-                session.commit()
-                return json_error_response("{}".format(msg))
-
-            resp = json_success(
-                json.dumps(
-                    {"query": query.to_dict()},
-                    default=utils.json_int_dttm_ser,
-                    ignore_nan=True,
-                ),
-                status=202,
-            )
+            query.status = QueryStatus.FAILED
+            query.error_message = msg
             session.commit()
-            return resp
+            return json_error_response("{}".format(msg))
+        resp = json_success(
+            json.dumps(
+                {"query": query.to_dict()},
+                default=utils.json_int_dttm_ser,
+                ignore_nan=True,
+            ),
+            status=202,
+        )
+        session.commit()
+        return resp
 
-        # Sync request.
+    def _sql_json_sync(
+        self, session: Session, rendered_query: str, query: Query
+    ) -> str:
+        """
+            Execute SQL query (sql json)
+
+        :param rendered_query: The rendered query (included templates)
+        :param query: The query SQL (SQLAlchemy) object
+        :return: String JSON response
+        """
         try:
             timeout = config.get("SQLLAB_TIMEOUT")
             timeout_msg = f"The query exceeded the {timeout} seconds timeout."
             with utils.timeout(seconds=timeout, error_message=timeout_msg):
                 # pylint: disable=no-value-for-parameter
                 data = sql_lab.get_sql_results(
-                    query_id,
+                    query.id,
                     rendered_query,
                     return_results=True,
                     user_name=g.user.username if g.user else None,
@@ -2998,11 +2615,114 @@ class Superset(BaseSupersetView):
                 encoding=None,
             )
         except Exception as e:
-            logging.exception(e)
-            return json_error_response("{}".format(e))
+            logging.exception(f"Query {query.id}: {e}")
+            return json_error_response(f"{{e}}")
         if data.get("status") == QueryStatus.FAILED:
             return json_error_response(payload=data)
         return json_success(payload)
+
+    @has_access_api
+    @expose("/sql_json/", methods=["POST"])
+    @event_logger.log_this
+    def sql_json(self):
+        """Runs arbitrary sql and returns data as json"""
+        # Collect Values
+        database_id: int = request.json.get("database_id")
+        schema: str = request.json.get("schema")
+        sql: str = request.json.get("sql")
+        try:
+            template_params: dict = json.loads(
+                request.json.get("templateParams") or "{}"
+            )
+        except json.decoder.JSONDecodeError:
+            logging.warning(
+                f"Invalid template parameter {request.json.get('templateParams')}"
+                " specified. Defaulting to empty dict"
+            )
+            template_params = {}
+        limit = request.json.get("queryLimit") or app.config.get("SQL_MAX_ROW")
+        async_flag: bool = request.json.get("runAsync")
+        if limit < 0:
+            logging.warning(
+                f"Invalid limit of {limit} specified. Defaulting to max limit."
+            )
+            limit = 0
+        select_as_cta: bool = request.json.get("select_as_cta")
+        tmp_table_name: str = request.json.get("tmp_table_name")
+        client_id: str = request.json.get("client_id") or utils.shortid()[:10]
+        sql_editor_id: str = request.json.get("sql_editor_id")
+        tab_name: str = request.json.get("tab")
+        status: bool = QueryStatus.PENDING if async_flag else QueryStatus.RUNNING
+
+        session = db.session()
+        mydb = session.query(models.Database).filter_by(id=database_id).one_or_none()
+        if not mydb:
+            return json_error_response(f"Database with id {database_id} is missing.")
+
+        # Set tmp_table_name for CTA
+        if select_as_cta and mydb.force_ctas_schema:
+            tmp_table_name = f"{mydb.force_ctas_schema}.{tmp_table_name}"
+
+        # Save current query
+        query = Query(
+            database_id=database_id,
+            sql=sql,
+            schema=schema,
+            select_as_cta=select_as_cta,
+            start_time=now_as_float(),
+            tab_name=tab_name,
+            status=status,
+            sql_editor_id=sql_editor_id,
+            tmp_table_name=tmp_table_name,
+            user_id=g.user.get_id() if g.user else None,
+            client_id=client_id,
+        )
+        try:
+            session.add(query)
+            session.flush()
+            query_id = query.id
+            session.commit()  # shouldn't be necessary
+        except SQLAlchemyError as e:
+            logging.error(f"Errors saving query details {e}")
+            session.rollback()
+            raise Exception(_("Query record was not created as expected."))
+        if not query_id:
+            raise Exception(_("Query record was not created as expected."))
+
+        logging.info(f"Triggering query_id: {query_id}")
+
+        rejected_tables = security_manager.rejected_tables(sql, mydb, schema)
+        if rejected_tables:
+            query.status = QueryStatus.FAILED
+            session.commit()
+            return json_error_response(
+                security_manager.get_table_access_error_msg(rejected_tables),
+                link=security_manager.get_table_access_link(rejected_tables),
+                status=403,
+            )
+
+        try:
+            template_processor = get_template_processor(
+                database=query.database, query=query
+            )
+            rendered_query = template_processor.process_template(
+                query.sql, **template_params
+            )
+        except Exception as e:
+            error_msg = utils.error_msg_from_exception(e)
+            return json_error_response(
+                f"Query {query_id}: Template rendering failed: {error_msg}"
+            )
+
+        # set LIMIT after template processing
+        limits = [mydb.db_engine_spec.get_limit_from_sql(rendered_query), limit]
+        query.limit = min(lim for lim in limits if lim is not None)
+
+        # Async request.
+        if async_flag:
+            return self._sql_json_async(session, rendered_query, query)
+        # Sync request.
+        return self._sql_json_sync(session, rendered_query, query)
 
     @has_access
     @expose("/csv/<client_id>")
@@ -3012,15 +2732,11 @@ class Superset(BaseSupersetView):
         logging.info("Exporting CSV file [{}]".format(client_id))
         query = db.session.query(Query).filter_by(client_id=client_id).one()
 
-        rejected_tables = security_manager.rejected_datasources(
+        rejected_tables = security_manager.rejected_tables(
             query.sql, query.database, query.schema
         )
         if rejected_tables:
-            flash(
-                security_manager.get_table_access_error_msg(
-                    "{}".format(rejected_tables)
-                )
-            )
+            flash(security_manager.get_table_access_error_msg(rejected_tables))
             return redirect("/")
         blob = None
         if results_backend and query.results_key:
@@ -3030,8 +2746,12 @@ class Superset(BaseSupersetView):
             blob = results_backend.get(query.results_key)
         if blob:
             logging.info("Decompressing")
-            json_payload = utils.zlib_decompress_to_string(blob)
-            obj = json.loads(json_payload)
+            payload = utils.zlib_decompress(
+                blob, decode=not results_backend_use_msgpack
+            )
+            obj = _deserialize_results_payload(
+                payload, query, results_backend_use_msgpack
+            )
             columns = [c["name"] for c in obj["columns"]]
             df = pd.DataFrame.from_records(obj["data"], columns=columns)
             logging.info("Using pandas to convert to CSV")
@@ -3046,7 +2766,18 @@ class Superset(BaseSupersetView):
         response.headers[
             "Content-Disposition"
         ] = f"attachment; filename={query.name}.csv"
-        logging.info("Ready to return response")
+        event_info = {
+            "event_type": "data_export",
+            "client_id": client_id,
+            "row_count": len(df.index),
+            "database": query.database.name,
+            "schema": query.schema,
+            "sql": query.sql,
+            "exported_format": "csv",
+        }
+        logging.info(
+            f"CSV exported: {repr(event_info)}", extra={"superset_event": event_info}
+        )
         return response
 
     @api
@@ -3173,7 +2904,7 @@ class Superset(BaseSupersetView):
             return self.dashboard(str(welcome_dashboard_id))
 
         payload = {
-            "user": bootstrap_user_data(),
+            "user": bootstrap_user_data(g.user),
             "common": self.common_bootstrap_payload(),
         }
 
@@ -3191,8 +2922,14 @@ class Superset(BaseSupersetView):
         if not username and g.user:
             username = g.user.username
 
+        user = (
+            db.session.query(ab_models.User).filter_by(username=username).one_or_none()
+        )
+        if not user:
+            abort(404, description=f"User: {username} does not exist.")
+
         payload = {
-            "user": bootstrap_user_data(username, include_perms=True),
+            "user": bootstrap_user_data(user, include_perms=True),
             "common": self.common_bootstrap_payload(),
         }
 
@@ -3227,7 +2964,7 @@ class Superset(BaseSupersetView):
         get the database query string for this slice
         """
         viz_obj = get_viz(slice_id)
-        security_manager.assert_datasource_permission(viz_obj.datasource)
+        security_manager.assert_viz_permission(viz_obj)
         return self.get_query_string_response(viz_obj)
 
     @api
@@ -3261,11 +2998,9 @@ class Superset(BaseSupersetView):
             return self.json_response(schemas_allowed_processed)
         except Exception:
             return json_error_response(
-                (
-                    "Failed to fetch schemas allowed for csv upload in this database! "
-                    "Please contact Superset Admin!\n\n"
-                    "The error message returned was:\n{}"
-                ).format(traceback.format_exc())
+                "Failed to fetch schemas allowed for csv upload in this database! "
+                "Please contact Superset Admin!",
+                stacktrace=utils.get_stacktrace(),
             )
 
 
@@ -3337,10 +3072,17 @@ appbuilder.add_separator("Sources")
 
 
 @app.after_request
-def apply_http_headers(response):
+def apply_http_headers(response: Response):
     """Applies the configuration's http headers to all responses"""
-    for k, v in config.get("HTTP_HEADERS").items():
-        response.headers[k] = v
+
+    # HTTP_HEADERS is deprecated, this provides backwards compatibility
+    response.headers.extend(
+        {**config["OVERRIDE_HTTP_HEADERS"], **config.get("HTTP_HEADERS", {})}
+    )
+
+    for k, v in config["DEFAULT_HTTP_HEADERS"].items():
+        if k not in response.headers:
+            response.headers[k] = v
     return response
 
 

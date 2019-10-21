@@ -18,25 +18,24 @@
 
 """Utility functions used across Superset"""
 
+import logging
+import time
+import urllib.request
 from collections import namedtuple
 from datetime import datetime, timedelta
 from email.utils import make_msgid, parseaddr
-import logging
-import time
-
+from urllib.error import URLError
 
 import croniter
+import simplejson as json
 from dateutil.tz import tzlocal
 from flask import render_template, Response, session, url_for
 from flask_babel import gettext as __
 from flask_login import login_user
-import requests
 from retry.api import retry_call
 from selenium.common.exceptions import WebDriverException
 from selenium.webdriver import chrome, firefox
-import simplejson as json
-from six.moves import urllib
-from werkzeug.utils import parse_cookie
+from werkzeug.http import parse_cookie
 
 # Superset framework imports
 from superset import app, db, security_manager
@@ -258,8 +257,11 @@ def _get_slice_data(schedule):
     for cookie in _get_auth_cookies():
         cookies["session"] = cookie
 
-    response = requests.get(slice_url, cookies=cookies)
-    response.raise_for_status()
+    opener = urllib.request.build_opener()
+    opener.addheaders.append(("Cookie", f"session={cookies['session']}"))
+    response = opener.open(slice_url)
+    if response.getcode() != 200:
+        raise URLError(response.getcode())
 
     # TODO: Move to the csv module
     rows = [r.split(b",") for r in response.content.splitlines()]

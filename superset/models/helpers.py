@@ -16,20 +16,21 @@
 # under the License.
 # pylint: disable=C,R,W
 """a collection of model-related helper classes and functions"""
-from datetime import datetime
 import json
 import logging
 import re
+from datetime import datetime
+from typing import List, Optional
 
-from flask import escape, Markup
-from flask_appbuilder.models.decorators import renders
-from flask_appbuilder.models.mixins import AuditMixin
 import humanize
 import sqlalchemy as sa
+import yaml
+from flask import escape, g, Markup
+from flask_appbuilder.models.decorators import renders
+from flask_appbuilder.models.mixins import AuditMixin
 from sqlalchemy import and_, or_, UniqueConstraint
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.orm.exc import MultipleResultsFound
-import yaml
 
 from superset.utils.core import QueryStatus
 
@@ -44,15 +45,15 @@ def json_to_dict(json_str):
 
 
 class ImportMixin(object):
-    export_parent = None
+    export_parent: Optional[str] = None
     # The name of the attribute
     # with the SQL Alchemy back reference
 
-    export_children = []
+    export_children: List[str] = []
     # List of (str) names of attributes
     # with the SQL Alchemy forward references
 
-    export_fields = []
+    export_fields: List[str] = []
     # The names of the attributes
     # that are available for import and export
 
@@ -265,6 +266,19 @@ class ImportMixin(object):
         d.update(kwargs)
         self.params = json.dumps(d)
 
+    def reset_ownership(self):
+        """ object will belong to the user the current user """
+        # make sure the object doesn't have relations to a user
+        # it will be filled by appbuilder on save
+        self.created_by = None
+        self.changed_by = None
+        # flask global context might not exist (in cli or tests for example)
+        try:
+            if g.user:
+                self.owners = [g.user]
+        except Exception:
+            self.owners = []
+
     @property
     def params_dict(self):
         return json_to_dict(self.params)
@@ -287,7 +301,7 @@ class AuditMixinNullable(AuditMixin):
     )
 
     @declared_attr
-    def created_by_fk(self):  # noqa
+    def created_by_fk(self):
         return sa.Column(
             sa.Integer,
             sa.ForeignKey("ab_user.id"),
@@ -296,7 +310,7 @@ class AuditMixinNullable(AuditMixin):
         )
 
     @declared_attr
-    def changed_by_fk(self):  # noqa
+    def changed_by_fk(self):
         return sa.Column(
             sa.Integer,
             sa.ForeignKey("ab_user.id"),
@@ -317,7 +331,7 @@ class AuditMixinNullable(AuditMixin):
         return ""
 
     @renders("created_by")
-    def creator(self):  # noqa
+    def creator(self):
         return self._user_link(self.created_by)
 
     @property
@@ -341,7 +355,7 @@ class QueryResult(object):
 
     """Object returned by the query interface"""
 
-    def __init__(  # noqa
+    def __init__(
         self, df, query, duration, status=QueryStatus.SUCCESS, error_message=None
     ):
         self.df = df

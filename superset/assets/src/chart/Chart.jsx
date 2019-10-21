@@ -22,7 +22,6 @@ import { Alert } from 'react-bootstrap';
 
 import { isFeatureEnabled, FeatureFlag } from 'src/featureFlags';
 import { Logger, LOG_ACTIONS_RENDER_CHART_CONTAINER } from '../logger/LogUtils';
-import { safeStringify } from '../utils/safeStringify';
 import Loading from '../components/Loading';
 import RefreshChartOverlay from '../components/RefreshChartOverlay';
 import StackTraceMessage from '../components/StackTraceMessage';
@@ -59,12 +58,16 @@ const propTypes = {
   // dashboard callbacks
   addFilter: PropTypes.func,
   onQuery: PropTypes.func,
+  onFilterMenuOpen: PropTypes.func,
+  onFilterMenuClose: PropTypes.func,
 };
 
 const BLANK = {};
 
 const defaultProps = {
   addFilter: () => BLANK,
+  onFilterMenuOpen: () => BLANK,
+  onFilterMenuClose: () => BLANK,
   initialValues: BLANK,
   setControlValue() {},
   triggerRender: false,
@@ -82,10 +85,8 @@ class Chart extends React.PureComponent {
     }
   }
 
-  componentDidUpdate(prevProps) {
-    if (this.props.triggerQuery &&
-      safeStringify(prevProps.formData) !== safeStringify(this.props.formData)
-    ) {
+  componentDidUpdate() {
+    if (this.props.triggerQuery) {
       this.runQuery();
     }
   }
@@ -175,9 +176,7 @@ class Chart extends React.PureComponent {
             />
           )}
           <div className={`slice_container ${isFaded ? ' faded' : ''}`}>
-            <ChartRenderer
-              {...this.props}
-            />
+            <ChartRenderer {...this.props} />
           </div>
         </div>
       </ErrorBoundary>

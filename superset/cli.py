@@ -16,17 +16,20 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint: disable=C,R,W
-from datetime import datetime
 import logging
+from datetime import datetime
 from subprocess import Popen
 from sys import stdout
 
 import click
-from colorama import Fore, Style
-from pathlib2 import Path
 import yaml
+from colorama import Fore, Style
+from flask import g
+from flask_appbuilder import Model
+from pathlib2 import Path
 
-from superset import app, appbuilder, data, db, security_manager
+from superset import app, appbuilder, db, examples, security_manager
+from superset.common.tags import add_favorites, add_owners, add_types
 from superset.utils import core as utils, dashboard_import_export, dict_import_export
 
 config = app.config
@@ -45,7 +48,7 @@ def make_shell_context():
 @app.cli.command()
 def init():
     """Inits the Superset application"""
-    utils.get_or_create_main_db()
+    utils.get_example_database()
     appbuilder.add_permissions(update_perms=True)
     security_manager.sync_role_definitions()
 
@@ -67,66 +70,84 @@ def version(verbose):
     print(Style.RESET_ALL)
 
 
-def load_examples_run(load_test_data):
-    print("Loading examples into {}".format(db))
+def load_examples_run(load_test_data, only_metadata=False, force=False):
+    if only_metadata:
+        print("Loading examples metadata")
+    else:
+        examples_db = utils.get_example_database()
+        print(f"Loading examples metadata and related data into {examples_db}")
 
-    data.load_css_templates()
+    examples.load_css_templates()
 
     print("Loading energy related dataset")
-    data.load_energy()
+    examples.load_energy(only_metadata, force)
 
     print("Loading [World Bank's Health Nutrition and Population Stats]")
-    data.load_world_bank_health_n_pop()
+    examples.load_world_bank_health_n_pop(only_metadata, force)
 
     print("Loading [Birth names]")
-    data.load_birth_names()
+    examples.load_birth_names(only_metadata, force)
 
     print("Loading [Unicode test data]")
-    data.load_unicode_test_data()
+    examples.load_unicode_test_data(only_metadata, force)
 
     if not load_test_data:
         print("Loading [Random time series data]")
-        data.load_random_time_series_data()
+        examples.load_random_time_series_data(only_metadata, force)
 
         print("Loading [Random long/lat data]")
-        data.load_long_lat_data()
+        examples.load_long_lat_data(only_metadata, force)
 
         print("Loading [Country Map data]")
-        data.load_country_map_data()
+        examples.load_country_map_data(only_metadata, force)
 
         print("Loading [Multiformat time series]")
-        data.load_multiformat_time_series()
+        examples.load_multiformat_time_series(only_metadata, force)
 
         print("Loading [Paris GeoJson]")
-        data.load_paris_iris_geojson()
+        examples.load_paris_iris_geojson(only_metadata, force)
 
         print("Loading [San Francisco population polygons]")
-        data.load_sf_population_polygons()
+        examples.load_sf_population_polygons(only_metadata, force)
 
         print("Loading [Flights data]")
-        data.load_flights()
+        examples.load_flights(only_metadata, force)
 
         print("Loading [BART lines]")
-        data.load_bart_lines()
+        examples.load_bart_lines(only_metadata, force)
 
         print("Loading [Multi Line]")
-        data.load_multi_line()
+        examples.load_multi_line(only_metadata)
 
         print("Loading [Misc Charts] dashboard")
-        data.load_misc_dashboard()
+        examples.load_misc_dashboard()
 
         print("Loading DECK.gl demo")
-        data.load_deck_dash()
+        examples.load_deck_dash()
 
     print("Loading [Tabbed dashboard]")
-    data.load_tabbed_dashboard()
+    examples.load_tabbed_dashboard(only_metadata)
 
 
 @app.cli.command()
 @click.option("--load-test-data", "-t", is_flag=True, help="Load additional test data")
-def load_examples(load_test_data):
+@click.option(
+    "--only-metadata", "-m", is_flag=True, help="Only load metadata, skip actual data"
+)
+@click.option(
+    "--force", "-f", is_flag=True, help="Force load data even if table already exists"
+)
+def load_examples(load_test_data, only_metadata=False, force=False):
     """Loads a set of Slices and Dashboards and a supporting dataset """
-    load_examples_run(load_test_data)
+    load_examples_run(load_test_data, only_metadata, force)
+
+
+@app.cli.command()
+@click.option("--database_name", "-d", help="Database name to change")
+@click.option("--uri", "-u", help="Database URI to change")
+def set_database_uri(database_name, uri):
+    """Updates a database connection URI """
+    utils.get_or_create_db(database_name, uri)
 
 
 @app.cli.command()
@@ -173,7 +194,13 @@ def refresh_druid(datasource, merge):
     default=False,
     help="recursively search the path for json files",
 )
-def import_dashboards(path, recursive):
+@click.option(
+    "--username",
+    "-u",
+    default=None,
+    help="Specify the user name to assign dashboards to",
+)
+def import_dashboards(path, recursive, username):
     """Import dashboards from JSON"""
     p = Path(path)
     files = []
@@ -183,6 +210,8 @@ def import_dashboards(path, recursive):
         files.extend(p.glob("*.json"))
     elif p.exists() and recursive:
         files.extend(p.rglob("*.json"))
+    if username is not None:
+        g.user = security_manager.find_user(username=username)
     for f in files:
         logging.info("Importing dashboard from file %s", f)
         try:
@@ -400,72 +429,47 @@ def load_test_users_run():
     Syncs permissions for those users/roles
     """
     if config.get("TESTING"):
-        security_manager.sync_role_definitions()
-        gamma_sqllab_role = security_manager.add_role("gamma_sqllab")
-        for perm in security_manager.find_role("Gamma").permissions:
-            security_manager.add_permission_role(gamma_sqllab_role, perm)
-        utils.get_or_create_main_db()
-        db_perm = utils.get_main_database(security_manager.get_session).perm
-        security_manager.add_permission_view_menu("database_access", db_perm)
-        db_pvm = security_manager.find_permission_view_menu(
-            view_menu_name=db_perm, permission_name="database_access"
+
+        sm = security_manager
+
+        examples_db = utils.get_example_database()
+
+        examples_pv = sm.add_permission_view_menu("database_access", examples_db.perm)
+
+        sm.sync_role_definitions()
+        gamma_sqllab_role = sm.add_role("gamma_sqllab")
+        sm.add_permission_role(gamma_sqllab_role, examples_pv)
+
+        for role in ["Gamma", "sql_lab"]:
+            for perm in sm.find_role(role).permissions:
+                sm.add_permission_role(gamma_sqllab_role, perm)
+
+        users = (
+            ("admin", "Admin"),
+            ("gamma", "Gamma"),
+            ("gamma2", "Gamma"),
+            ("gamma_sqllab", "gamma_sqllab"),
+            ("alpha", "Alpha"),
         )
-        gamma_sqllab_role.permissions.append(db_pvm)
-        for perm in security_manager.find_role("sql_lab").permissions:
-            security_manager.add_permission_role(gamma_sqllab_role, perm)
+        for username, role in users:
+            user = sm.find_user(username)
+            if not user:
+                sm.add_user(
+                    username,
+                    username,
+                    "user",
+                    username + "@fab.org",
+                    sm.find_role(role),
+                    password="general",
+                )
+        sm.get_session.commit()
 
-        admin = security_manager.find_user("admin")
-        if not admin:
-            security_manager.add_user(
-                "admin",
-                "admin",
-                " user",
-                "admin@fab.org",
-                security_manager.find_role("Admin"),
-                password="general",
-            )
 
-        gamma = security_manager.find_user("gamma")
-        if not gamma:
-            security_manager.add_user(
-                "gamma",
-                "gamma",
-                "user",
-                "gamma@fab.org",
-                security_manager.find_role("Gamma"),
-                password="general",
-            )
-
-        gamma2 = security_manager.find_user("gamma2")
-        if not gamma2:
-            security_manager.add_user(
-                "gamma2",
-                "gamma2",
-                "user",
-                "gamma2@fab.org",
-                security_manager.find_role("Gamma"),
-                password="general",
-            )
-
-        gamma_sqllab_user = security_manager.find_user("gamma_sqllab")
-        if not gamma_sqllab_user:
-            security_manager.add_user(
-                "gamma_sqllab",
-                "gamma_sqllab",
-                "user",
-                "gamma_sqllab@fab.org",
-                gamma_sqllab_role,
-                password="general",
-            )
-
-        alpha = security_manager.find_user("alpha")
-        if not alpha:
-            security_manager.add_user(
-                "alpha",
-                "alpha",
-                "user",
-                "alpha@fab.org",
-                security_manager.find_role("Alpha"),
-                password="general",
-            )
-        security_manager.get_session.commit()
+@app.cli.command()
+def sync_tags():
+    """Rebuilds special tags (owner, type, favorited by)."""
+    # pylint: disable=no-member
+    metadata = Model.metadata
+    add_types(db.engine, metadata)
+    add_owners(db.engine, metadata)
+    add_favorites(db.engine, metadata)

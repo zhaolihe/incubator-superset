@@ -14,20 +14,28 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+import unittest
+import uuid
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-import unittest
 from unittest.mock import patch
-import uuid
 
 import numpy
+from flask import Flask
+from flask_caching import Cache
+from sqlalchemy.exc import ArgumentError
 
+from superset import app, db, security_manager
 from superset.exceptions import SupersetException
+from superset.models.core import Database
 from superset.utils.core import (
     base_json_conv,
     convert_legacy_filters_into_adhoc,
     datetime_f,
+    format_timedelta,
+    get_or_create_db,
     get_since_until,
+    get_stacktrace,
     json_int_dttm_ser,
     json_iso_dttm_ser,
     JSONEncodedDict,
@@ -37,9 +45,11 @@ from superset.utils.core import (
     parse_human_timedelta,
     parse_js_uri_path_item,
     parse_past_timedelta,
+    setup_cache,
+    split,
     validate_json,
     zlib_compress,
-    zlib_decompress_to_string,
+    zlib_decompress,
 )
 
 
@@ -111,6 +121,7 @@ class UtilsTestCase(unittest.TestCase):
         assert isinstance(base_json_conv(set([1])), list) is True
         assert isinstance(base_json_conv(Decimal("1.0")), float) is True
         assert isinstance(base_json_conv(uuid.uuid4()), str) is True
+        assert isinstance(base_json_conv(timedelta(0)), str) is True
 
     @patch("superset.utils.core.datetime")
     def test_parse_human_timedelta(self, mock_datetime):
@@ -132,7 +143,7 @@ class UtilsTestCase(unittest.TestCase):
     def test_zlib_compression(self):
         json_str = '{"test": 1}'
         blob = zlib_compress(json_str)
-        got_str = zlib_decompress_to_string(blob)
+        got_str = zlib_decompress(blob)
         self.assertEquals(json_str, got_str)
 
     @patch("superset.utils.core.to_adhoc", mock_to_adhoc)
@@ -293,6 +304,7 @@ class UtilsTestCase(unittest.TestCase):
             "extra_filters": [
                 {"col": "a", "op": "in", "val": "someval"},
                 {"col": "B", "op": "==", "val": ["c1", "c2"]},
+                {"col": "c", "op": "in", "val": ["c1", 1, None]},
             ],
             "adhoc_filters": [
                 {
@@ -308,6 +320,13 @@ class UtilsTestCase(unittest.TestCase):
                     "expressionType": "SIMPLE",
                     "operator": "==",
                     "subject": "B",
+                },
+                {
+                    "clause": "WHERE",
+                    "comparator": ["c1", 1, None],
+                    "expressionType": "SIMPLE",
+                    "operator": "in",
+                    "subject": "c",
                 },
             ],
         }
@@ -326,6 +345,13 @@ class UtilsTestCase(unittest.TestCase):
                     "expressionType": "SIMPLE",
                     "operator": "==",
                     "subject": "B",
+                },
+                {
+                    "clause": "WHERE",
+                    "comparator": ["c1", 1, None],
+                    "expressionType": "SIMPLE",
+                    "operator": "in",
+                    "subject": "c",
                 },
             ]
         }
@@ -510,6 +536,19 @@ class UtilsTestCase(unittest.TestCase):
         iso = datetime.now().isoformat()[:10].split("-")
         [a, b, c] = [int(v) for v in iso]
         self.assertEquals(datetime_f(datetime(a, b, c)), "<nobr>00:00:00</nobr>")
+
+    def test_format_timedelta(self):
+        self.assertEquals(format_timedelta(timedelta(0)), "0:00:00")
+        self.assertEquals(format_timedelta(timedelta(days=1)), "1 day, 0:00:00")
+        self.assertEquals(format_timedelta(timedelta(minutes=-6)), "-0:06:00")
+        self.assertEquals(
+            format_timedelta(timedelta(0) - timedelta(days=1, hours=5, minutes=6)),
+            "-1 day, 5:06:00",
+        )
+        self.assertEquals(
+            format_timedelta(timedelta(0) - timedelta(days=16, hours=4, minutes=3)),
+            "-16 days, 4:03:00",
+        )
 
     def test_json_encoded_obj(self):
         obj = {"a": 5, "b": ["a", "g", 5]}
@@ -763,3 +802,81 @@ class UtilsTestCase(unittest.TestCase):
     def test_parse_js_uri_path_items_item_optional(self):
         self.assertIsNone(parse_js_uri_path_item(None))
         self.assertIsNotNone(parse_js_uri_path_item("item"))
+
+    def test_setup_cache_no_config(self):
+        app = Flask(__name__)
+        cache_config = None
+        self.assertIsNone(setup_cache(app, cache_config))
+
+    def test_setup_cache_null_config(self):
+        app = Flask(__name__)
+        cache_config = {"CACHE_TYPE": "null"}
+        self.assertIsNone(setup_cache(app, cache_config))
+
+    def test_setup_cache_standard_config(self):
+        app = Flask(__name__)
+        cache_config = {
+            "CACHE_TYPE": "redis",
+            "CACHE_DEFAULT_TIMEOUT": 60,
+            "CACHE_KEY_PREFIX": "superset_results",
+            "CACHE_REDIS_URL": "redis://localhost:6379/0",
+        }
+        assert isinstance(setup_cache(app, cache_config), Cache) is True
+
+    def test_setup_cache_custom_function(self):
+        app = Flask(__name__)
+        CustomCache = type("CustomCache", (object,), {"__init__": lambda *args: None})
+
+        def init_cache(app):
+            return CustomCache(app, {})
+
+        assert isinstance(setup_cache(app, init_cache), CustomCache) is True
+
+    def test_get_stacktrace(self):
+        with app.app_context():
+            app.config["SHOW_STACKTRACE"] = True
+            try:
+                raise Exception("NONONO!")
+            except Exception:
+                stacktrace = get_stacktrace()
+                self.assertIn("NONONO", stacktrace)
+
+            app.config["SHOW_STACKTRACE"] = False
+            try:
+                raise Exception("NONONO!")
+            except Exception:
+                stacktrace = get_stacktrace()
+                assert stacktrace is None
+
+    def test_split(self):
+        self.assertEqual(list(split("a b")), ["a", "b"])
+        self.assertEqual(list(split("a,b", delimiter=",")), ["a", "b"])
+        self.assertEqual(list(split("a,(b,a)", delimiter=",")), ["a", "(b,a)"])
+        self.assertEqual(
+            list(split('a,(b,a),"foo , bar"', delimiter=",")),
+            ["a", "(b,a)", '"foo , bar"'],
+        )
+        self.assertEqual(
+            list(split("a,'b,c'", delimiter=",", quote="'")), ["a", "'b,c'"]
+        )
+        self.assertEqual(list(split('a "b c"')), ["a", '"b c"'])
+        self.assertEqual(list(split(r'a "b \" c"')), ["a", r'"b \" c"'])
+
+    def test_get_or_create_db(self):
+        get_or_create_db("test_db", "sqlite:///superset.db")
+        database = db.session.query(Database).filter_by(database_name="test_db").one()
+        self.assertIsNotNone(database)
+        self.assertEqual(database.sqlalchemy_uri, "sqlite:///superset.db")
+        self.assertIsNotNone(
+            security_manager.find_permission_view_menu(
+                "datasource_access", database.perm
+            )
+        )
+        # Test change URI
+        get_or_create_db("test_db", "sqlite:///changed.db")
+        database = db.session.query(Database).filter_by(database_name="test_db").one()
+        self.assertEqual(database.sqlalchemy_uri, "sqlite:///changed.db")
+
+    def test_get_or_create_db_invalid_uri(self):
+        with self.assertRaises(ArgumentError):
+            get_or_create_db("test_db", "yoursql:superset.db/()")
