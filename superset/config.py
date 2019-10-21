@@ -41,10 +41,11 @@ from superset.utils.logging_configurator import DefaultLoggingConfigurator
 STATS_LOGGER = DummyStatsLogger()
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+DB_DIR="/Users/zhaolihe/personal/code/config"
 if "SUPERSET_HOME" in os.environ:
     DATA_DIR = os.environ["SUPERSET_HOME"]
 else:
-    DATA_DIR = os.path.join(os.path.expanduser("~"), ".superset")
+    DATA_DIR = os.path.join(DB_DIR, "db")
 
 # ---------------------------------------------------------
 # Superset specific config
@@ -78,7 +79,7 @@ FILTER_SELECT_ROW_LIMIT = 10000
 SUPERSET_WORKERS = 2  # deprecated
 SUPERSET_CELERY_WORKERS = 32  # deprecated
 
-SUPERSET_WEBSERVER_ADDRESS = "0.0.0.0"
+SUPERSET_WEBSERVER_ADDRESS = "10.0.3.18"
 SUPERSET_WEBSERVER_PORT = 8088
 
 # This is an important setting, and should be lower than your
