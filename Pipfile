@@ -84,6 +84,8 @@ WTForms-JSON = "==0.3.3"
 WTForms = "==2.2.1"
 requests = "*"
 pydruid = "*"
+flask-mysqldb = "*"
+mysqlclient = "*"
 
 [dev-packages]
 

@@ -55,11 +55,11 @@ def upgrade():
     # Second, make the columns non-nullable.
     with op.batch_alter_table("datasources") as batch_op:
         batch_op.alter_column(
-            "cluster_name", existing_type=sa.String(250), nullable=False
+            "cluster_name", existing_type=sa.String(128), nullable=False
         )
     with op.batch_alter_table("clusters") as batch_op:
         batch_op.alter_column(
-            "cluster_name", existing_type=sa.String(250), nullable=False
+            "cluster_name", existing_type=sa.String(128), nullable=False
         )
     with op.batch_alter_table("dbs") as batch_op:
         batch_op.alter_column(
@@ -99,12 +99,12 @@ def downgrade():
     # Second, make the columns nullable.
     with op.batch_alter_table("datasources") as batch_op:
         batch_op.alter_column(
-            "cluster_name", existing_type=sa.String(250), nullable=True
+            "cluster_name", existing_type=sa.String(128), nullable=True
         )
 
     with op.batch_alter_table("clusters") as batch_op:
         batch_op.alter_column(
-            "cluster_name", existing_type=sa.String(250), nullable=True
+            "cluster_name", existing_type=sa.String(128), nullable=True
         )
     with op.batch_alter_table("dbs") as batch_op:
         batch_op.alter_column(

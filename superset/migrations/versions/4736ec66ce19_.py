@@ -47,7 +47,7 @@ datasources = sa.Table(
     "datasources",
     sa.MetaData(),
     sa.Column("id", sa.Integer, primary_key=True),
-    sa.Column("datasource_name", sa.String(255)),
+    sa.Column("datasource_name", sa.String(128)),
 )
 
 

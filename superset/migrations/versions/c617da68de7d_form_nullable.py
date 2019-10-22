@@ -97,7 +97,7 @@ class DruidCluster(Base):
     id = Column(Integer, primary_key=True)
     broker_host = Column(String(255))
     broker_endpoint = Column(String(255))
-    cluster_name = Column(String(250))
+    cluster_name = Column(String(128))
     verbose_name = Column(String(250))
 
 
@@ -110,7 +110,7 @@ class DruidColumn(BaseColumnMixin, Base):
 class DruidDatasource(BaseDatasourceMixin, Base):
     __tablename__ = "datasources"
 
-    datasource_name = Column(String(255))
+    datasource_name = Column(String(128))
     default_endpoint = Column(Text)
     fetch_values_from = Column(String(100))
 
