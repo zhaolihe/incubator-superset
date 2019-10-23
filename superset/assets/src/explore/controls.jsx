@@ -162,7 +162,8 @@ const metrics = {
   mapStateToProps: (state) => {
     const datasource = state.datasource;
     return {
-      columns: datasource ? datasource.columns : [],
+      // columns: datasource ? datasource.columns : [],
+      columns: [],
       savedMetrics: datasource ? datasource.metrics : [],
       datasourceType: datasource && datasource.type,
     };
@@ -1026,6 +1027,42 @@ export const controls = {
       savedMetrics: state.datasource ? state.datasource.metrics : [],
       datasourceType: state.datasource && state.datasource.type,
     }),
+  },
+
+  biSortBy: {
+    type: 'MetricsControl',
+    label: t('Sort By'),
+    default: null,
+    description: t('Metric used to define the top series'),
+    mapStateToProps: (state) => {
+      if (state.controls === undefined) {
+        return {
+        columns: [],
+        savedMetrics: [],
+        datasourceType: state.datasource && state.datasource.type,
+      };
+      }
+      const groupBy = state.controls.groupby;
+      const calc = state.controls.metrics;
+      const list = [];
+      groupBy.options.forEach(option => {
+        if (groupBy.value.indexOf(option.column_name) >= 0) {
+          list.push(option);
+        }
+      });
+
+      calc.savedMetrics.forEach(metric => {
+        if (calc.value.indexOf(metric.metric_name) >= 0) {
+          list.push(metric);
+        }
+      });
+
+      return {
+        columns: [],
+        savedMetrics: list,
+        datasourceType: state.datasource && state.datasource.type,
+      };
+    },
   },
 
   order_desc: {

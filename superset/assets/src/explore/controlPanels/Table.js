@@ -27,8 +27,8 @@ export default {
       controlSetRows: [
         ['groupby'],
         ['metrics'],
-        ['timeseries_limit_metric', 'row_limit'],
-        ['include_time', 'order_desc'],
+        ['biSortBy', 'row_limit'],
+        ['order_desc'],
       ],
     },
     {

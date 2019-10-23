@@ -29,6 +29,15 @@ export const druidTimeSeries = {
   ],
 };
 
+export const biTimeSeries = {
+  label: t('Time'),
+  expanded: true,
+  description: t('Time related form attributes'),
+  controlSetRows: [
+    ['time_range'],
+  ],
+};
+
 export const datasourceAndVizType = {
   label: t('Datasource & Chart Type'),
   expanded: true,

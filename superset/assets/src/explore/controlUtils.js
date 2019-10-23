@@ -132,9 +132,9 @@ export function getControlState(controlKey, vizType, state, value) {
   return getControlStateFromControlConfig(getControlConfig(controlKey, vizType), state, value);
 }
 
-export function sectionsToRender(vizType, datasourceType) {
+export function sectionsToRender(vizType, datasourceType, datasourceName) {
   const controlPanelConfig = getChartControlPanelRegistry().get(vizType) || {};
-  const { sectionOverrides = {}, controlPanelSections = [] } = controlPanelConfig;
+  const {sectionOverrides = {}, controlPanelSections = []} = controlPanelConfig;
 
   const sectionsCopy = { ...sections };
 
@@ -149,14 +149,29 @@ export function sectionsToRender(vizType, datasourceType) {
     }
   });
 
-  const { datasourceAndVizType, sqlaTimeSeries, druidTimeSeries, filters } = sectionsCopy;
+  const {
+    datasourceAndVizType,
+    sqlaTimeSeries,
+    druidTimeSeries,
+    biTimeSeries,
+    filters,
+  } = sectionsCopy;
+
+  let timeSeries;
+  if (datasourceType === 'table') {
+    timeSeries = sqlaTimeSeries;
+  } else if (datasourceName === 'bi_metadata') {
+    timeSeries = biTimeSeries;
+  } else {
+    timeSeries = druidTimeSeries;
+  }
 
   return [].concat(
-    datasourceAndVizType,
-    datasourceType === 'table' ? sqlaTimeSeries : druidTimeSeries,
-    isFeatureEnabled(FeatureFlag.SCOPED_FILTER) ? filters : undefined,
-    controlPanelSections,
-  ).filter(section => section);
+      datasourceAndVizType,
+      timeSeries,
+      isFeatureEnabled(FeatureFlag.SCOPED_FILTER) ? filters : undefined,
+      controlPanelSections,
+    ).filter(section => section);
 }
 
 export function getAllControlsState(vizType, datasourceType, state, formData) {
