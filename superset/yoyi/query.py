@@ -50,7 +50,8 @@ class query:
         if "columns" in query_obj.keys():
             fields = list(set(query_obj["columns"]).union(set(fields)))
         since, until = self.parse_time_range(query_obj["from_dttm"], query_obj["to_dttm"])
-        orderbys = query_obj["orderby"] if  "orderby" in query_obj else []
+        orderby = query_obj["bi_sort_by"] if "bi_sort_by" in query_obj else ""
+        is_desc = query_obj["order_desc"] if "order_desc" in query_obj else False
 
         handler = filter_handler()
         filters = handler.build_filters(query_obj["filter"])
@@ -67,7 +68,7 @@ class query:
                 "pageSize": query_obj["row_limit"] if "row_limit" in query_obj else 100,
                 "hasTotalCount": False
             },
-            "orderBys": query.parse_oder_by(orderbys)
+            "orderBys": query.parse_oder_by(orderby, is_desc)
         }
         return json.dumps(queryEntity)
 
@@ -80,15 +81,14 @@ class query:
         return (since, until)
 
     @staticmethod
-    def parse_oder_by(orderbys):
+    def parse_oder_by(order_by, is_desc):
         index = 1
         orders = []
-        for k, v in orderbys:
+        if order_by:
             info = {
-                "orderBy": k,
+                "orderBy": order_by,
                 "orderIndex": index,
-                "ascending": v
+                "ascending": is_desc,
             }
             orders.append(info)
-            index += 1
         return orders
