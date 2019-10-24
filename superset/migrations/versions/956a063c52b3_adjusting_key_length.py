@@ -67,8 +67,8 @@ def upgrade():
     with op.batch_alter_table("datasources", schema=None) as batch_op:
         batch_op.alter_column(
             "datasource_name",
-            existing_type=sa.VARCHAR(length=256),
-            type_=sa.String(length=255),
+            existing_type=sa.VARCHAR(length=128),
+            type_=sa.String(length=128),
             existing_nullable=True,
         )
 
@@ -109,8 +109,8 @@ def downgrade():
     with op.batch_alter_table("datasources", schema=None) as batch_op:
         batch_op.alter_column(
             "datasource_name",
-            existing_type=sa.String(length=255),
-            type_=sa.VARCHAR(length=256),
+            existing_type=sa.String(length=128),
+            type_=sa.VARCHAR(length=128),
             existing_nullable=True,
         )
 

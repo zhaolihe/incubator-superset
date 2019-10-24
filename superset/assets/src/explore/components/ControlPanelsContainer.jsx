@@ -77,7 +77,7 @@ class ControlPanelsContainer extends React.Component {
   }
 
   sectionsToRender() {
-    return sectionsToRender(this.props.form_data.viz_type, this.props.datasource_type);
+    return sectionsToRender(this.props.form_data.viz_type, this.props.datasource_type,this.props.exploreState.datasource.datasource_name);
   }
 
   removeAlert() {

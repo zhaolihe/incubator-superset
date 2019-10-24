@@ -108,12 +108,12 @@ def upgrade():
     with op.batch_alter_table("tables") as batch_op:
         batch_op.drop_constraint("user_id", type_="foreignkey")
         batch_op.drop_column("user_id")
-    with op.batch_alter_table("datasources") as batch_op:
-        batch_op.drop_constraint(
-            generic_find_fk_constraint_name("datasources", {"id"}, "ab_user", insp),
-            type_="foreignkey",
-        )
-        batch_op.drop_column("user_id")
+    # with op.batch_alter_table("datasources") as batch_op:
+    #     batch_op.drop_constraint(
+    #         generic_find_fk_constraint_name("datasources", {"id"}, "ab_user", insp),
+    #         type_="foreignkey",
+    #     )
+    #     batch_op.drop_column("user_id")
 
 
 def downgrade():
