@@ -55,7 +55,6 @@ logging.getLogger("tasks.email_reports").setLevel(logging.INFO)
 # Time in seconds, we will wait for the page to load and render
 PAGE_RENDER_WAIT = 30
 
-
 EmailContent = namedtuple("EmailContent", ["body", "data", "images"])
 
 
@@ -264,7 +263,7 @@ def _get_slice_data(schedule):
         raise URLError(response.getcode())
 
     # TODO: Move to the csv module
-    rows = [r.split(b",") for r in response.content.splitlines()]
+    rows = [r.split(b",") for r in response.read().splitlines()]
 
     if schedule.delivery_type == EmailDeliveryType.inline:
         data = None
@@ -281,7 +280,7 @@ def _get_slice_data(schedule):
             )
 
     elif schedule.delivery_type == EmailDeliveryType.attachment:
-        data = {__("%(name)s.csv", name=slc.slice_name): response.content}
+        data = {__("%(name)s.csv", name=slc.slice_name): response.read()}
         body = __(
             '<b><a href="%(url)s">Explore in Superset</a></b><p></p>',
             name=slc.slice_name,
