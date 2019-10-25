@@ -86,6 +86,10 @@ requests = "*"
 pydruid = "*"
 flask-mysqldb = "*"
 mysqlclient = "*"
+pyhive = "*"
+sasl = "*"
+thrift-sasl = "*"
+impyla = "*"
 
 [dev-packages]
 
