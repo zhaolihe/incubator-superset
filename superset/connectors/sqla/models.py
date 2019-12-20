@@ -554,6 +554,8 @@ class SqlaTable(Model, BaseDatasource):
         return get_template_processor(table=self, database=self.database, **kwargs)
 
     def get_query_str_extended(self, query_obj: Dict) -> QueryStringExtended:
+        if("bi_sort_by" in query_obj):
+            query_obj.pop("bi_sort_by")
         sqlaq = self.get_sqla_query(**query_obj)
         sql = self.database.compile_sqla_query(sqlaq.sqla_query)
         logging.info(sql)

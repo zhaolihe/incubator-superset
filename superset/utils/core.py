@@ -728,11 +728,11 @@ def send_email_smtp(
 
     # Attach any files passed directly
     for name, body in (data or {}).items():
-        msg.attach(
-            MIMEApplication(
-                body, Content_Disposition="attachment; filename='%s'" % name, Name=name
+        # body.decode('utf-8').encode('gb2312') 解决csv中文乱码问题
+        att = MIMEApplication(
+                body.decode("utf-8").encode('gb2312'), Content_Disposition="attachment; filename='%s'" % name, Name=name
             )
-        )
+        msg.attach(att)
 
     # Attach any inline images, which may be required for display in
     # HTML content (inline)
